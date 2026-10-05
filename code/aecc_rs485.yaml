@@ -1,0 +1,1281 @@
+substitutions:
+  name: aecc-battery    ## change name to marstek-m2 or marstek-m3 for more batterys
+  friendly_name: aecc-battery  ## change name to Marstek m2 or Marstek m3 for more batterys
+
+## Version 1.0 - Added full AECC register map from github.com/makstech/esphome-aecc
+##                (docs/REGISTERS.md + components/aecc/registers.h)
+#
+# AECC Modbus quirks (from makstech/esphome-aecc docs/PROTOCOL.md):
+#   - slave 1, 9600 8N1, only function codes 3 (read) and 6 (write single) exist
+#   - max 32 registers per read, leave >= 12 ms between frames
+#   - NEVER probe unknown addresses: a run of illegal-address reads can hang the inverter.
+#     Known-valid islands: 0x9AC0-0x9B13, 0x9C40-0x9C4B, 0xA028-0xA0F9, plus telemetry 0xFE06-0xFE1F
+#   - settings verified on a Humsienk HSBPSS2K5W7K68WHEU; enum values/defaults can differ
+#     on other builds, so read a value back before trusting it.
+#
+
+esphome:
+  name: ${name}
+  # friendly_name: ${friendly_name}  ### temporarely uncommented because of sensor naming wrong for nodered flow gitcode bob
+  min_version: 2026.9.0   # needed for modbus turnaround_time
+  name_add_mac_suffix: false
+
+esp32:
+  board: esp32-s3-devkitc-1  ## M5stack Atom S3 lite  
+  flash_size: 8MB
+  variant: esp32s3
+  cpu_frequency: 240MHz
+  framework:
+    type: esp-idf
+    version: recommended
+    ## Custom sdkconfig options
+    sdkconfig_options:
+      CONFIG_COMPILER_OPTIMIZATION_SIZE: y   # needs the CONFIG_ prefix, otherwise ignored
+      CONFIG_BT_ENABLED: n
+
+## No psram: block - the AtomS3 Lite (ESP32-S3FN8) has no PSRAM.
+
+## Enable/Disable logging
+logger:
+  logs:
+    component: ERROR
+  
+## Enable Home Assistant API
+api:
+  reboot_timeout: 0s
+#  encryption:
+#    key: !secret marstek_m1_api_encryption_key
+
+## Enable OTA updates
+ota:
+  - platform: esphome
+  - platform: web_server
+#  password: !secret marstek_m1_ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  reboot_timeout: 0s
+  fast_connect: true
+  power_save_mode: none   # "high" adds latency and dropouts; the ESP is mains-powered anyway
+
+## uncomment if you need a fixed ip address
+#  manual_ip:
+#    static_ip: 192.168.178.126
+#    gateway: 192.168.178.1
+#    subnet: 255.255.255.0
+
+## Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "${friendly_name} Hotspot"
+    password: "configesp"
+    ap_timeout: 15s
+
+captive_portal:
+  id: id_captive_portal
+  
+web_server:
+  port: 80
+  version: 3
+  include_internal: False
+#  ota: False
+  local: True
+  sorting_groups:
+    - id: Info
+      name: "Info"
+      sorting_weight: -40
+    - id: Control
+      name: "Control"
+      sorting_weight: -30
+    - id: Status
+      name: "Status"
+      sorting_weight: -20
+    - id: Settings
+      name: "Settings"
+      sorting_weight: -15
+    - id: Advanced
+      name: "Advanced (careful!)"
+      sorting_weight: -12
+    - id: Diagnostic
+      name: "Diagnostic"
+      sorting_weight: -10
+
+## Configure i2c (grove port on Atom S3)
+i2c:
+  - id: bus_a
+    sda: GPIO2
+    scl: GPIO1
+
+## Configure UART
+uart:
+  - id: mod_bus
+    tx_pin: GPIO6
+    rx_pin: GPIO5
+    baud_rate: 9600
+    data_bits: 8
+    stop_bits: 1
+    parity: NONE
+
+modbus:
+  - uart_id: mod_bus
+    id: modbus1
+    send_wait_time: 20ms
+    turnaround_time: 15ms   # AECC needs >= 12 ms between frames; default (600 ms) is needlessly slow
+
+modbus_controller:
+  - id: mt
+    address: 0x1
+    modbus_id: modbus1
+    update_interval: 5s     # live telemetry
+
+  ## Same inverter, polled less often (replaces skip_updates, which ESPHome 2026.x ignores)
+  - id: mt_30s
+    address: 0x1
+    modbus_id: modbus1
+    update_interval: 30s     # temperatures
+
+  - id: mt_slow
+    address: 0x1
+    modbus_id: modbus1
+    update_interval: 300s    # settings (numbers / selects / switches)
+
+# Uart logging on/off switch
+switch:
+  - platform: template
+    name: UART Logging
+    id: uart_debug_switch
+    icon: mdi:text
+    restore_mode: ALWAYS_OFF
+    optimistic: true
+    turn_on_action:
+      - logger.set_level: VERBOSE
+    turn_off_action:
+      - logger.set_level: ERROR
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 20
+      
+## AECC on/off settings (0 = off, 1 = on)
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Energy Saving Mode"
+    id: eco_mode
+    icon: mdi:leaf
+    register_type: holding
+    address: 0xA02D        # ecoEn
+    bitmask: 1
+    entity_category: config
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 31
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Buzzer Mute"
+    id: buzzer_mute
+    icon: mdi:volume-off
+    register_type: holding
+    address: 0xA033        # muteEn
+    bitmask: 1
+    entity_category: config
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 32
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Battery Activation"
+    id: battery_activation
+    icon: mdi:battery-sync
+    register_type: holding
+    address: 0xA03E        # battActiveSet
+    bitmask: 1
+    entity_category: config
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 33
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Mixing Priority"
+    id: mixing_priority
+    icon: mdi:call-merge
+    register_type: holding
+    address: 0xA041        # hybirdPriorityEn
+    bitmask: 1
+    entity_category: config
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 34
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "External CT From EMS Host"
+    id: external_ct_host
+    icon: mdi:meter-electric
+    register_type: holding
+    address: 0xA047        # extCtGetHostEn
+    bitmask: 1
+    entity_category: config
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 35
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Independent Pack"
+    id: independent_pack
+    icon: mdi:battery-plus-variant
+    register_type: holding
+    address: 0xA0AF        # battPackNotUnion
+    bitmask: 1
+    entity_category: config
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 36
+
+  ## SAFETY: off stops the unit disconnecting from a dead grid
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Anti Islanding"
+    id: anti_islanding
+    icon: mdi:shield-alert
+    register_type: holding
+    address: 0xA069        # islandEn
+    bitmask: 1
+    entity_category: config
+    disabled_by_default: true
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 37
+
+  ## off drops the RS485 BMS link to the pack
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "BMS Function"
+    id: bms_function
+    icon: mdi:battery-heart-variant
+    register_type: holding
+    address: 0xA099        # bmsSet
+    bitmask: 1
+    entity_category: config
+    disabled_by_default: true
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 38
+
+  ## switches the whole inverter off
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Device Power"
+    id: device_power
+    icon: mdi:power
+    register_type: holding
+    address: 0x9C40        # onOffCtrl
+    bitmask: 1
+    entity_category: config
+    disabled_by_default: true
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 39
+
+# Tekstsensoren
+# "Device Name" (register 31000) removed: that is a Marstek Venus register. It does not
+# exist on the AECC inverter, and repeated reads of invalid addresses can make the
+# inverter stop answering Modbus altogether.
+text_sensor:
+  - platform: template
+    name: "Device Status"
+    id: device_status
+    icon: mdi:list-status
+    update_interval: never   # filled by "Device Status Code" (register 65039)
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 0
+
+sensor:
+  - name: "Atom temperature"
+    id: atom_temperature
+    icon: mdi:thermometer
+    platform: internal_temperature
+    update_interval: 30s
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 14
+
+
+  - platform: wifi_signal
+    name: "ESP WiFi Signal Strength"
+    id: esp_wifi_signal_strength
+    icon: mdi:wifi
+    update_interval: 60s
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 5
+
+  - platform: copy
+    name: "ESP WiFi Signal Percentage"
+    id: esp_wifi_signal_proc
+    source_id: esp_wifi_signal_strength
+    icon: mdi:wifi
+    filters:
+      - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
+    unit_of_measurement: "%"
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 4
+
+## Live telemetry, 65030-65046 (0xFE06-0xFE16). Read in one block by modbus_controller.
+
+  - name: "Battery State Of Charge"
+    id: battery_state_of_charge
+    icon: mdi:power-plug-battery-outline
+    platform: modbus_controller
+    modbus_controller_id: mt
+    register_type: holding
+    address: 0xFE06        # 65030
+    value_type: U_WORD
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    accuracy_decimals: 0   # whole percent
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 6
+
+  - name: "Battery Power"
+    id: battery_power
+    icon: mdi:flash
+    platform: modbus_controller
+    modbus_controller_id: mt
+    register_type: holding
+    address: 0xFE07        # 65031, + = discharging, - = charging
+    value_type: S_WORD
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 7
+
+  - name: "Battery Charge Power"
+    id: battery_charge_power
+    platform: copy
+    source_id: battery_power
+    icon: mdi:battery-arrow-up
+    filters:
+      - lambda: "return x < 0 ? -x : 0;"
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 8
+
+  - name: "Battery Discharge Power"
+    id: battery_discharge_power
+    platform: copy
+    source_id: battery_power
+    icon: mdi:battery-arrow-down
+    filters:
+      - lambda: "return x > 0 ? x : 0;"
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 9
+
+  - name: "AC Charge Or Losses Power"
+    id: losses_power
+    icon: mdi:transmission-tower-import
+    platform: modbus_controller
+    modbus_controller_id: mt
+    register_type: holding
+    address: 0xFE08        # 65032, standby + conversion loss / power drawn from AC to charge
+    value_type: U_WORD
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 10
+
+  - name: "Grid Power"
+    id: grid_power
+    icon: mdi:transmission-tower
+    platform: modbus_controller
+    modbus_controller_id: mt
+    register_type: holding
+    address: 0xFE0A        # 65034, at the inverter's own port, + = exporting
+    value_type: S_WORD
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 11
+
+  - name: "Backup (EPS) Load"
+    id: backup_load
+    icon: mdi:power-socket-eu
+    platform: modbus_controller
+    modbus_controller_id: mt
+    register_type: holding
+    address: 0xFE10        # 65040
+    value_type: U_WORD
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 12
+
+  - name: "Active Power Setpoint"
+    id: power_setpoint
+    icon: mdi:target
+    platform: modbus_controller
+    modbus_controller_id: mt
+    register_type: holding
+    address: 0xFE16        # 65046, + = discharging, - = charging
+    value_type: S_WORD
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 13
+
+  - name: "PV Power"
+    id: pv_power
+    icon: mdi:solar-power
+    platform: modbus_controller
+    modbus_controller_id: mt
+    register_type: holding
+    address: 0xFE1F        # 65055, AC-coupled PV port; raw value is negative while producing
+    value_type: S_WORD
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - multiply: -1       # shown positive while producing
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 14
+
+
+## Temperatures, 30073-30075 (0x7579-0x757B), signed, 0.1 °C.
+## Source: Lunergy Modbus TCP handleiding. Read as one 3-register block every 30 s (mt_30s).
+  - name: "Inverter Temperature"
+    id: temperature_1
+    icon: mdi:thermometer
+    platform: modbus_controller
+    modbus_controller_id: mt_30s
+    register_type: holding
+    address: 30073         # 0x7579
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 1
+
+  - name: "Radiator Temperature"
+    id: temperature_2
+    icon: mdi:thermometer
+    platform: modbus_controller
+    modbus_controller_id: mt_30s
+    register_type: holding
+    address: 30074         # 0x757A
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 2
+
+  - name: "Transformer Temperature"
+    id: temperature_3
+    icon: mdi:thermometer
+    platform: modbus_controller
+    modbus_controller_id: mt_slow
+    register_type: holding
+    address: 30075         # 0x757B
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 3
+
+
+###############################################################################
+## AECC SETTINGS (registers 0xA028-0xA0AF, 0x9C40, 0x9ACE)
+## Polled every 5 minutes via modbus_controller mt_slow. Only FC6 single-register writes are used.
+## Entities marked disabled_by_default can break things: enable them in HA only if you know why.
+###############################################################################
+number:
+## Battery power setpoint 0xFE16 (signed, - = charge, + = discharge).
+## Only honoured while the energy manager (JSON API on TCP 8080, NOT Modbus) is already running
+## a non-zero command with custom mode (EMS 3030) on. Otherwise the write is accepted and reverts
+## within ~1.5 s. The unit also falls back to its schedule slot ~3 s after you stop writing, so
+## it must be re-written continuously (e.g. every 2 s from Home Assistant).
+  - platform: modbus_controller
+    modbus_controller_id: mt
+    name: "Power Setpoint"
+    id: power_setpoint_number
+    icon: mdi:target
+    register_type: holding
+    address: 0xFE16
+    value_type: S_WORD
+    unit_of_measurement: "W"
+    mode: box
+    min_value: -2500
+    max_value: 2500
+    step: 1
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 1
+
+## Grid-tie (on-grid output) power cap. Lives in THREE places: 0xA03F, mirror 0x9ACE and EMS 3039
+## (JSON API only). Output tops out at the lowest of them. This writes both Modbus copies.
+## Note: it caps total on-grid output (incl. your own load), so it is not a pure export limit.
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Grid Tie Power Cap"
+    id: grid_export_limit
+    icon: mdi:transmission-tower-export
+    register_type: holding
+    address: 0xA03F        # onGridActivePowerSet
+    value_type: U_WORD
+    unit_of_measurement: "W"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 2500        # adjust to your unit's rating
+    step: 1
+    write_lambda: |-
+      // also write the mirror copy at 0x9ACE
+      auto mirror = modbus_controller::ModbusCommandItem::create_write_single_command(
+          id(mt_slow), 0x9ACE, (uint16_t) x);
+      id(mt_slow)->queue_command(mirror);
+      return x;
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 0
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Constant Voltage"
+    id: cv_voltage
+    icon: mdi:flash
+    register_type: holding
+    address: 0xA08D        # cvVolt
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    entity_category: config
+    mode: box
+    min_value: 40
+    max_value: 60
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 1
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Float Voltage"
+    id: float_voltage
+    icon: mdi:flash
+    register_type: holding
+    address: 0xA08E        # floatVolt
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    entity_category: config
+    mode: box
+    min_value: 40
+    max_value: 60
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 2
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "CV Charge Time"
+    id: cv_charge_time
+    icon: mdi:timer-outline
+    register_type: holding
+    address: 0xA090        # cvChgTimeSet
+    value_type: U_WORD
+    unit_of_measurement: "min"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 900
+    step: 1
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 3
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "CV Return Voltage"
+    id: cv_return_voltage
+    icon: mdi:flash
+    register_type: holding
+    address: 0xA091        # cvChgBackVolt
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    entity_category: config
+    mode: box
+    min_value: 40
+    max_value: 60
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 4
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Battery To Mains Voltage"
+    id: battery_to_mains_voltage
+    icon: mdi:flash
+    register_type: holding
+    address: 0xA092        # inv2LineVolt
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    entity_category: config
+    mode: box
+    min_value: 40
+    max_value: 60
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 5
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Mains To Battery Voltage"
+    id: mains_to_battery_voltage
+    icon: mdi:flash
+    register_type: holding
+    address: 0xA093        # lineBack2InvVolt
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    entity_category: config
+    mode: box
+    min_value: 40
+    max_value: 60
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 6
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Undervoltage Alarm"
+    id: undervoltage_alarm
+    icon: mdi:battery-alert
+    register_type: holding
+    address: 0xA094        # battLowVolt
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    entity_category: config
+    mode: box
+    min_value: 40
+    max_value: 60
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 7
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Low Voltage Shutdown"
+    id: low_voltage_shutdown
+    icon: mdi:battery-off
+    register_type: holding
+    address: 0xA095        # battDelayOffVolt
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    entity_category: config
+    mode: box
+    min_value: 40
+    max_value: 60
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 8
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "End Of Discharge Voltage"
+    id: eod_voltage
+    icon: mdi:battery-off-outline
+    register_type: holding
+    address: 0xA096        # battEodVolt
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    entity_category: config
+    mode: box
+    min_value: 40
+    max_value: 60
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 9
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Voltage Shutdown Delay"
+    id: shutdown_delay
+    icon: mdi:timer-outline
+    register_type: holding
+    address: 0xA097        # battDelayOffTime
+    value_type: U_WORD
+    unit_of_measurement: "s"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 600
+    step: 1
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 10
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "End Of Discharge Clear Voltage"
+    id: eod_clear_voltage
+    icon: mdi:flash
+    register_type: holding
+    address: 0xA098        # battEodBackVolt
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    entity_category: config
+    mode: box
+    min_value: 40
+    max_value: 60
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 11
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Max Charge Current"
+    id: max_charge_current
+    icon: mdi:current-dc
+    register_type: holding
+    address: 0xA02F        # maxChgCurrSet
+    value_type: U_WORD
+    unit_of_measurement: "A"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 100
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 12
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "PV Max Charge Current"
+    id: pv_max_charge_current
+    icon: mdi:current-dc
+    register_type: holding
+    address: 0xA030        # chgCurrByPvSet
+    value_type: U_WORD
+    unit_of_measurement: "A"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 100
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 13
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Mains Max Charge Current"
+    id: mains_max_charge_current
+    icon: mdi:current-dc
+    register_type: holding
+    address: 0xA031        # chgCurrByLineSet (UNCONFIRMED: reads 35.0 A where the app shows 50 A)
+    value_type: U_WORD
+    unit_of_measurement: "A"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 100
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 14
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Saturation Current"
+    id: saturation_current
+    icon: mdi:current-dc
+    register_type: holding
+    address: 0xA035        # chgFullCurrSet
+    value_type: U_WORD
+    unit_of_measurement: "A"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 100
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 15
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "SOC Low Alarm"
+    id: soc_low_alarm
+    icon: mdi:battery-alert-variant-outline
+    register_type: holding
+    address: 0xA09B        # -
+    value_type: U_WORD
+    unit_of_measurement: "%"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 100
+    step: 1
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 16
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "SOC Shutdown"
+    id: soc_shutdown
+    icon: mdi:battery-10
+    register_type: holding
+    address: 0xA09C        # -
+    value_type: U_WORD
+    unit_of_measurement: "%"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 100
+    step: 1
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 17
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "SOC Full"
+    id: soc_full
+    icon: mdi:battery
+    register_type: holding
+    address: 0xA09D        # -
+    value_type: U_WORD
+    unit_of_measurement: "%"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 100
+    step: 1
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 18
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "SOC Inverter To Mains"
+    id: soc_inverter_to_mains
+    icon: mdi:battery-arrow-down-outline
+    register_type: holding
+    address: 0xA09E        # -
+    value_type: U_WORD
+    unit_of_measurement: "%"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 100
+    step: 1
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 19
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "SOC Mains To Inverter"
+    id: soc_mains_to_inverter
+    icon: mdi:battery-arrow-up-outline
+    register_type: holding
+    address: 0xA09F        # -
+    value_type: U_WORD
+    unit_of_measurement: "%"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 100
+    step: 1
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 20
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Output Voltage"
+    id: output_voltage
+    icon: mdi:sine-wave
+    register_type: holding
+    address: 0xA029        # outVoltSet
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    entity_category: config
+    mode: box
+    min_value: 200
+    max_value: 250
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 21
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Output Frequency"
+    id: output_frequency
+    icon: mdi:sine-wave
+    register_type: holding
+    address: 0xA02A        # outFreqSet
+    value_type: U_WORD
+    unit_of_measurement: "Hz"
+    entity_category: config
+    mode: box
+    min_value: 45
+    max_value: 65
+    step: 0.01
+    multiply: 100
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 22
+
+select:
+  ## plausible mapping, never confirmed against the app
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Inverter Operating Mode"
+    id: inverter_mode
+    icon: mdi:cog
+    address: 0xA028        # outPriority
+    value_type: U_WORD
+    entity_category: config
+    optionsmap:
+      "Photovoltaic priority (PV)": 0
+      "Utility power priority (GID)": 1
+      "PV Battery Priority (BAT)": 2
+      "Hybrid Priority (HBD)": 3
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 23
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Charge Priority"
+    id: charge_priority
+    icon: mdi:battery-charging
+    address: 0xA02E        # chgPriority
+    value_type: U_WORD
+    entity_category: config
+    optionsmap:
+      "Photovoltaic priority (OSO)": 0
+      "Utility Priority (OUO)": 1
+      "Mixed mode (SNU)": 2
+      "PV only (NUC)": 3
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 24
+
+  ## 'PV to grid' means anti-backflow is OFF
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "On Grid Mode"
+    id: on_grid_mode
+    icon: mdi:transmission-tower-export
+    address: 0xA034        # onGirdSet
+    value_type: U_WORD
+    entity_category: config
+    optionsmap:
+      "PV to load": 0
+      "PV to grid": 1
+      "Anti-backflow (external CT sensor)": 2
+      "Anti-backflow (external smart device)": 3
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 25
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Utility Range"
+    id: utility_range
+    icon: mdi:arrow-expand-horizontal
+    address: 0xA02B        # lineRangeSet
+    value_type: U_WORD
+    entity_category: config
+    optionsmap:
+      "UPS mode": 0
+      "APL mode": 1
+      "GEN mode": 2
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 26
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Parallel Mode"
+    id: parallel_mode
+    icon: mdi:vector-link
+    address: 0xA02C        # paraModeSet
+    value_type: U_WORD
+    entity_category: config
+    disabled_by_default: true
+    optionsmap:
+      "Stand-alone": 0
+      "Parallel operation": 1
+      "Split phase reference phase": 2
+      "Split phase 120 deg": 3
+      "Split phase 180 deg": 4
+      "Three phase - phase 1": 5
+      "Three phase - phase 2": 6
+      "Three phase - phase 3": 7
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 27
+
+  ## wrong value can damage the pack
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Battery Type"
+    id: battery_type
+    icon: mdi:battery-unknown
+    address: 0xA08C        # batType
+    value_type: U_WORD
+    entity_category: config
+    disabled_by_default: true
+    optionsmap:
+      "Custom Type": 0
+      "SLD Sealed Lead Acid": 1
+      "FLD Flooded Lead Acid": 2
+      "GEL Gel Lead Acid": 3
+      "LiFePO4 14S": 4
+      "LiFePO4 15S": 5
+      "LiFePO4 16S": 6
+      "LiFePO4 7S": 7
+      "LiFePO4 8S": 8
+      "LiFePO4 9S": 9
+      "Ternary Lithium 7S": 10
+      "Ternary Lithium 8S": 11
+      "Ternary Lithium 13S": 12
+      "Ternary Lithium 14S": 13
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 28
+
+  ## unit ships on 1 = Pylon
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "BMS Protocol"
+    id: bms_protocol
+    icon: mdi:protocol
+    address: 0xA09A        # bmsProtocal
+    value_type: U_WORD
+    entity_category: config
+    disabled_by_default: true
+    optionsmap:
+      "Voltronic": 0
+      "Pylon": 1
+      "Aoguan": 2
+      "Oulite": 3
+      "Gotion": 4
+      "Sunwoda": 5
+      "CF": 6
+      "Dyuness": 7
+      "Pace": 8
+      "BST": 9
+      "Foxess": 10
+      "AEC": 11
+      "Pylon-V3.5": 12
+      "MeZic-V3.5": 13
+      "Tentek": 14
+      "Rvtran": 15
+      "YUZE": 16
+      "EVT": 17
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 29
+
+  ## Netherlands normally uses EN50549
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Grid Standard"
+    id: grid_standard
+    icon: mdi:certificate
+    address: 0xA043        # gridStandardSet
+    value_type: U_WORD
+    entity_category: config
+    disabled_by_default: true
+    optionsmap:
+      "GNL": 0
+      "VDE4105": 1
+      "IEEE1547": 2
+      "CEI-021": 3
+      "VDE0126": 4
+      "EN50549 (General)": 5
+      "EN50549-SE (Switzerland)": 6
+      "EN50549-DK1 (Denmark)": 7
+      "SI4777 (Israel)": 8
+      "TOR-Z1 (Austria)": 9
+      "EN50549-PL (Poland)": 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 30
+
+###############################################################################
+## STATUS LED
+###############################################################################
+## Simple status led for Atom s3 (lite)
+## G35=RGB WS2812C-2020
+light:
+  - name: "Status led"
+    id: status_led
+    icon: mdi:lightbulb
+    platform: esp32_rmt_led_strip
+    internal: true # Hides from Home Assistant
+    rgb_order: GRB
+    pin: 35
+    num_leds: 1   # the AtomS3 Lite has a single LED
+    chipset: ws2812
+#    rmt_channel: 0 #only on platform: arduino
+    restore_mode: ALWAYS_OFF
+    entity_category: diagnostic
+    effects:
+      - pulse:
+          name: slow_pulse
+          transition_length: 250ms
+          update_interval: 500ms
+          min_brightness: 10%
+          max_brightness: 50%
+      - pulse:
+          name: fast_pulse
+          transition_length: 100ms
+          update_interval: 100ms
+          min_brightness: 25%
+          max_brightness: 100%
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 13
+
+# 🟢 Green on => wifi connected- api connected/ Green blinking => wifi connected - api disconnected
+# 🟣 Purple => wifi disconnected
+# 🔵 Blue => AP mode
+
+interval:
+  - interval: 10s
+    then:
+      if:
+        condition:
+          wifi.connected:
+        then:
+          if:
+            condition:
+              api.connected:
+            then:
+              - light.turn_on:
+                  id: status_led
+                  brightness: 50%
+                  red: 0
+                  green: 100%
+                  blue: 0
+                  effect: None
+            else:
+              - light.turn_on:
+                  id: status_led
+                  brightness: 50%
+                  red: 0
+                  green: 100%
+                  blue: 0
+                  effect: slow_pulse              
+        else:
+          if:
+            condition:
+              - lambda: 'return id(id_captive_portal).is_active();'
+            then:
+              - light.turn_on:
+                  id: status_led
+                  brightness: 100%
+                  red: 0
+                  green: 0
+                  blue: 100%
+            else:
+              - light.turn_on:
+                  id: status_led
+                  brightness: 100%
+                  red: 100%
+                  green: 0
+                  blue: 0
+
+## knop op de atom ingedrukt houden = veranderen brightness
+script:
+  - id: adjust_brightness_loop
+    mode: restart
+    then:
+      - repeat:
+          count: 1000
+          then:
+            - lambda: |-
+                static float brightness = 0.0;
+                brightness += 0.1;
+                if (brightness > 1.0) brightness = 0.0;
+                auto call = id(status_led).make_call();
+                call.set_brightness(brightness);
+                call.perform();
+            - delay: 750ms
