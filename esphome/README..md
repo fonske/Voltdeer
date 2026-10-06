@@ -40,7 +40,7 @@ Modbus handles almost everything: live readings, all inverter settings, and the 
 
 ## Installation
 
-1. Copy `aecc_rs485.yaml` into your ESPHome config folder.
+1. Copy `aecc_battery_rs485.yaml` into your ESPHome config folder.
 2. Make sure `secrets.yaml` contains `wifi_ssid` and `wifi_password`.
 3. Edit the `substitutions:` at the top (see below). At minimum, set `aecc_ip`.
 4. Give the battery's WiFi module a **fixed IP / DHCP reservation** in your router.
