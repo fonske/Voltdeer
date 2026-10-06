@@ -1,6 +1,6 @@
 substitutions:
-  name: marstek-m1                # hostname; first flash from the old name: see "use_address" note under wifi
-  friendly_name: "Marstek M1"     # HA device name -> entity ids become sensor.marstek_m1_*, number.marstek_m1_*, ...
+  name: marstek-m1                # hostname; rename to marstek-m2, marstek-m3, etc for higher m configuration
+  friendly_name: "Marstek M1"     # HA device name -> entity ids become sensor.marstek_m1_*, number.marstek_m1_*, ... Rename for higher m configuration
 
   ## ---- Fake Marstek M1 interface for HBC (Home Battery Control) ----
   battery_device_name: "AECC Battery 1"   # shown on the HBC dashboard (must not be 'unknown')
