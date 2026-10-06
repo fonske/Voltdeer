@@ -1,0 +1,118 @@
+type: masonry
+path: mt1
+title: Marstek M1
+icon: mdi:battery-charging-60
+cards:
+  - type: vertical-stack
+    cards:
+      - type: horizontal-stack
+        cards:
+          - type: gauge
+            entity: sensor.p1_meter_power
+            name: P1 meter
+            needle: true
+            max: 6000
+            severity:
+              green: -6000
+              yellow: 0
+              red: 0
+            min: -6000
+          - type: gauge
+            entity: sensor.marstek_m1_ac_power
+            name: My battery
+            needle: true
+            max: 2500
+            severity:
+              green: -2500
+              yellow: 0
+              red: 0
+            min: -2500
+          - type: gauge
+            entity: sensor.marstek_m1_battery_state_of_charge
+            name: Totaal
+            needle: true
+            max: 100
+            severity:
+              green: 66
+              yellow: 33
+              red: 0
+            min: 0
+      - type: entities
+        entities:
+          - entity: sensor.marstek_m1_battery_remaining_capacity
+            name: Battery remaining
+          - entity: sensor.marstek_m1_inverter_temperature
+            name: Inverter
+          - entity: sensor.marstek_m1_pv_radiator_temperature
+            name: PV Radiator
+          - entity: sensor.marstek_m1_transformer_temperature
+            name: Transformer
+  - type: entities
+    entities:
+      - entity: sensor.marstek_m1_inverter_state
+        name: Inverter State
+      - entity: sensor.marstek_m1_battery_state_of_charge
+        name: Battery State Of Charge
+      - entity: sensor.marstek_m1_ac_power
+        name: AC Power
+      - entity: sensor.marstek_m1_grid_power
+        name: Grid Power
+      - entity: sensor.marstek_m1_battery_power
+        name: Battery Power
+      - entity: sensor.marstek_m1_pv_power
+        name: PV Power
+      - entity: sensor.marstek_m1_backup_power
+        name: Backup Power
+      - entity: sensor.marstek_m1_battery_total_energy
+        name: Battery Total Energy
+      - entity: sensor.marstek_m1_lifetime_energy_discharged
+        name: Lifetime Discharging Energy
+      - entity: sensor.marstek_m1_battery_remaining_capacity
+        name: Battery Remaining Capacity
+      - entity: sensor.marstek_m1_lifetime_energy_charged
+        name: Lifetime Charging Energy
+      - entity: sensor.marstek_m1_lifetime_rte
+        name: Lifetime Round Trip Efficiency
+    title: MT1
+  - type: entities
+    entities:
+      - entity: select.marstek_m1_rs485_control_mode
+        name: RS485 Control Mode
+      - entity: select.marstek_m1_user_work_mode
+        name: User Work Mode
+      - entity: select.marstek_m1_forcible_charge_discharge
+        name: Forcible Charge/Discharge
+      - entity: number.marstek_m1_forcible_discharge_power
+        name: Forcible Discharge Power
+      - entity: number.marstek_m1_forcible_charge_power
+        name: Forcible Charge Power
+      - entity: number.marstek_m1_max_charge_power
+        name: Max. Charge Power
+      - entity: number.marstek_m1_max_discharge_power
+        name: Max. Discharge Power
+      - entity: number.marstek_m1_charge_to_soc
+        name: Charge To SOC
+    title: MT1
+  - type: entities
+    entities:
+      - entity: sensor.marstek_m1_device_name
+        name: Device Name
+      - entity: sensor.marstek_m1_esp_wifi_signal_percentage
+        name: ESP WiFi Signal
+      - entity: sensor.marstek_m1_esp_wifi_signal_strength
+        name: ESP WiFi Signal Strength
+      - entity: binary_sensor.marstek_m1_fault
+        name: Fault
+      - entity: sensor.marstek_m1_atom_temperature
+        name: Atom Temperature
+      - entity: sensor.marstek_m1_esp_ssid
+        name: ESP SSID
+      - entity: sensor.marstek_m1_esp_ip_address
+        name: ESP IP Address
+      - entity: sensor.marstek_m1_aecc_ip_address
+        name: AECC IP Address
+      - entity: button.marstek_m1_read_ems_config
+      - entity: sensor.marstek_m1_ems_errors
+      - entity: sensor.marstek_m1_ems_reply
+      - entity: sensor.marstek_m1_setpoint_fallbacks
+    title: MT1

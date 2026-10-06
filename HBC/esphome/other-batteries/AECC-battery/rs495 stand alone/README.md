@@ -63,6 +63,39 @@ You don't need a Home Assistant template package or automation: the ESP exposes 
 
 > 💡 **Updating / reflashing:** take HBC out of full control first, so *RS485 Control Mode* is `disable` and the battery runs in its own *Self-Consumption (AI)* mode. While the ESP restarts it can't write the setpoint. Under HBC control the battery would fall back to slot 3003 for that time. Give HBC control again afterwards.
 
+## Dashboard (optional)
+
+`dashboard_marstek_m1.yaml` is a ready-made Home Assistant dashboard view (tab) for the battery. It has gauges for the P1 meter, battery power and SOC, plus cards with the readings, the HBC controls and the ESP diagnostics.
+
+**Add it as a new view (tab) to an existing dashboard:**
+
+1. In Home Assistant, open the dashboard you want to use, for example *Overview*.
+2. Click the **pencil icon** (top right) to edit the dashboard.
+   If you're asked to *take control*, confirm it.
+3. Click the **⋮ menu** (top right) → **Raw configuration editor**.
+4. Find the `views:` list and paste the contents of `dashboard_marstek_m1.yaml` as a new item.
+   Put `- ` before the first line (`type: masonry`) and indent the rest of the file by 2 spaces, so it lines up with the other views.
+5. Click **Save**, close the editor and click **Done**.
+   The new tab **Marstek M1** appears at `/<dashboard>/mt1`.
+
+**Or create a separate dashboard for it:**
+
+1. Go to **Settings → Dashboards → + Add dashboard → New dashboard from scratch**, give it a name and open it.
+2. Click the **pencil icon** → **⋮ menu** → **Raw configuration editor**.
+3. Replace everything with:
+   ```yaml
+   views:
+     - <paste dashboard_marstek_m1.yaml here, indented by 4 spaces>
+   ```
+4. Click **Save** and **Done**.
+
+**Before you save:**
+
+- Change `sensor.p1_meter_power` to the entity of your own P1 / smart meter. You can find it under **Settings → Devices & services → Entities**.
+- If an entity shows as *Entity not available*, check its id under **Settings → Devices & services → ESPHome → marstek-m1**. The ids must start with `marstek_m1_`.
+
+The gauge for **My battery** uses the Marstek sign: **+ = discharging** (delivering to the house), **− = charging**.
+
 ## Notes
 
 - **One JSON client at a time**: the battery's JSON API serves only one client. Close the vendor app and disable any other integration that uses port 8080, such as *AECC Battery (Local TCP)*.
