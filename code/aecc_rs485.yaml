@@ -1,7 +1,7 @@
 substitutions:
-  name: aecc-battery    ## change name to marstek-m2 or marstek-m3 for more batterys
-  friendly_name: aecc-battery  ## change name to Marstek m2 or Marstek m3 for more batterys
-
+  name: aecc-battery    
+  friendly_name: aecc-battery  
+  
 ## Version 1.0 - Added full AECC register map from github.com/makstech/esphome-aecc
 ##                (docs/REGISTERS.md + components/aecc/registers.h)
 #
