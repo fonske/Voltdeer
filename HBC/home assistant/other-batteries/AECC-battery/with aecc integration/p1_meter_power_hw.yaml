@@ -1,0 +1,87 @@
+# ---------------------------------------------------------------------------
+# sensor.p1_meter_power via REST (HomeWizard local API, polled every 6 seconds)
+#
+# Renaming the HomeWizard p1 meter integration entity (when already installed in home assistant)
+# ----------------------------------------------------------------------------------------------
+# Goal: the power entity of the HomeWizard P1 meter integration is renamed
+# from sensor.p1_meter_power to sensor.p1_meter_power_2, so the original ID
+# sensor.p1_meter_power is free for Home Battery Control in Node-RED.
+#
+# Steps:
+#   1. Settings -> Devices & services -> Entities.
+#   2. Search for sensor.p1_meter_power and check in the "Integration" column
+#      that it is the HomeWizard entity.
+#   3. Click the entity, then the gear icon (Settings) at the top right.
+#   4. Change the Entity ID to sensor.p1_meter_power_2.
+#   5. Click "Update". No restart needed; history and long-term statistics
+#      move along with the new ID.
+#   6. Copy this yaml file to directory /packages after changing the ip address
+#      to your own ip addres for the HW p1 meter wifi. Restart or reload home assistant.
+#
+# If another sensor already got sensor.p1_meter_power_2 automatically,
+# swap the IDs via a temporary name:
+#   1. HomeWizard entity -> sensor.p1_meter_power_tmp
+#   2. Other sensor      -> sensor.p1_meter_power
+#   3. HomeWizard entity -> sensor.p1_meter_power_2
+#
+# Check afterwards:
+#   - Automations, scripts, dashboards and the Energy dashboard are NOT
+#     updated automatically. Anything that should keep using the HomeWizard
+#     value must point to sensor.p1_meter_power_2.
+#   - Node-RED looks up entities by ID, so it reads whichever sensor holds
+#     sensor.p1_meter_power. If it still shows old values, redeploy the flow
+#     or restart the Home Assistant server connection in Node-RED.
+#   - Developer tools -> States: confirm sensor.p1_meter_power is the correct
+#     sensor and updates as expected.
+#
+# Why two sensors (never "unavailable")
+# -------------------------------------
+# A REST sensor becomes "unavailable" when a poll fails (timeout, WiFi hiccup)
+# and right after a Home Assistant restart, until its first successful poll.
+# HBC then logs "Received invalid sensor state: unavailable ... expected a number".
+# Therefore:
+#   - sensor.p1_meter_power_raw : the REST sensor (may briefly be unavailable).
+#   - sensor.p1_meter_power     : template sensor read by HBC. It only takes
+#     numeric values from the raw sensor and keeps the last valid value
+#     during a failed poll. Its value is also restored after a restart.
+#
+# Upgrading from the previous version of this file (single REST sensor):
+#   1. Replace this file and restart Home Assistant.
+#   2. Settings -> Devices & services -> Entities: search "P1 meter power".
+#      Delete the old REST entity sensor.p1_meter_power (status
+#      "no longer provided" / read-only, integration "RESTful").
+#   3. Rename the new template sensor (probably sensor.p1_meter_power_3)
+#      to sensor.p1_meter_power.
+# ---------------------------------------------------------------------------
+
+rest:
+  - resource: "http://192.168.0.194/api/v1/data"
+    scan_interval: 6  # needs to be larger than 5 sec for correct aecc battery control in HBC
+    timeout: 5        # must stay below scan_interval
+
+    sensor:
+      - name: "P1 meter power raw"
+        unique_id: p1_meter_power_raw
+        value_template: "{{ value_json.active_power_w }}"
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+
+template:
+  - trigger:
+      - trigger: state
+        entity_id: sensor.p1_meter_power_raw
+        not_to:
+          - unavailable
+          - unknown
+    condition:
+      - condition: template
+        value_template: "{{ is_number(trigger.to_state.state) }}"
+    sensor:
+      - name: "P1 meter power"
+        unique_id: p1_meter_power_hold
+        default_entity_id: sensor.p1_meter_power
+        state: "{{ trigger.to_state.state | float }}"
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement

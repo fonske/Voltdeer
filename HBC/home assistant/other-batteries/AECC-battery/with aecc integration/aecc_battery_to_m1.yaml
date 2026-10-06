@@ -1,0 +1,640 @@
+# =============================================================================
+# AECC Battery (Voltdeer SR5000 Pro) to Marstek M1 package for HBC
+# File   : aecc_battery_to_m1.yaml
+# Version: 1.1
+# =============================================================================
+# VERSION HISTORY
+#   1.1  2026-09-22  Fix: battery was reset from Self-Consumption (AI) to Custom / Manual
+#                    every 5 minutes (logbook: "triggered by Supervisor"). Cause: the HBC
+#                    master switch flow in Node-RED re-applies user work mode 'manual' every
+#                    300 s while the master mode is "Manual control", and select #22 forwarded
+#                    it directly to the battery. Now 'manual' is only forwarded when RS485
+#                    control mode is 'enable'; writes are skipped when the mode is already set.
+#   1.0  2026-09-22  Initial release.
+#                    - Merged aecc_battery_to_m1_marstek.yaml (template entities,
+#                      helpers, utility meters), automation_hbc_for_aecc_battery.yaml
+#                      (HBC forcible charge/discharge automation) and sr5000_pro.yaml
+#                      (lifetime RTE sensor) into this single package.
+#                    - Added configuration block documenting the two prefixes
+#                      (marstek_m1, aecc_battery) and the search/replace command to
+#                      generate packages for other HBC slots (M2, M3, ...).
+#                    - Automation id renamed to hbc_marstek_m1_aecc_battery_charge_discharge
+#                      so it contains both prefixes.
+# =============================================================================
+
+# =============================================================================
+# CONFIGURATION: the two prefixes used in this file
+# =============================================================================
+# Home Assistant does NOT allow templates or variables in entity ids, unique_ids,
+# helper keys or automation triggers, so the prefixes cannot be real variables.
+# Instead this file uses exactly TWO prefixes everywhere. To adapt the file,
+# search/replace these two strings (whole file, case sensitive):
+#
+#   MARSTEK SLOT PREFIX  : marstek_m1
+#       Used for the fake Marstek entities HBC talks to (sensor.marstek_m1_*,
+#       number.marstek_m1_*, select.marstek_m1_*) and the helpers
+#       (input_select./input_number.marstek_m1_aecc_battery_helper_*).
+#       Change to marstek_m2, marstek_m3, ... for another HBC battery slot.
+#
+#   AECC DEVICE PREFIX   : aecc_battery
+#       Used for the entities of the AECC Battery (Local TCP) integration
+#       (sensor.aecc_battery_*, number.aecc_battery_power_setpoint,
+#       select.aecc_battery_work_mode), the utility meters and the helper names.
+#       Change to the entity prefix HA derived from the friendly name you gave
+#       your device (e.g. "AECC Battery 2" -> aecc_battery_2).
+#
+# Example: make a second file for slot M2 driving a device called "AECC Battery 2":
+#   sed 's/marstek_m1/marstek_m2/g; s/aecc_battery/aecc_battery_2/g' \
+#       aecc_battery_to_m1.yaml > aecc_battery_2_to_m2.yaml
+# (Windows/PowerShell: (Get-Content aecc_battery_to_m1.yaml) -replace 'marstek_m1','marstek_m2' -replace 'aecc_battery','aecc_battery_2' | Set-Content aecc_battery_2_to_m2.yaml)
+#
+# Everything that must be unique per file (unique_ids, helper keys, utility meter
+# keys, the automation id) contains one of the two prefixes, so the replace above
+# yields a complete, non-conflicting second package.
+# =============================================================================
+#
+# Voltdeer SR5000 Pro (or any AECC battery) to M1 Marstek Package for HBC
+# HBC is a Home Battery Control package for Home Assistant and Node-RED.
+#   See the HBC documentation for details: https://docs.homebatterycontrol.com/
+#   See GitHub for the package download and installation instructions: https://github.com/gitcodebob/marstek-venus-rs485-node-red
+#
+# This single yaml file (Home Assistant package) fakes the Marstek M1 interface for a
+# Voltdeer SR5000 Pro (AECC platform) AND contains the automation that applies the HBC
+# decisions to the battery. As a result you can use the Voltdeer SR5000 Pro as the first
+# battery in your HBC setup. (M1)
+#
+# The Voltdeer (or any AECC battery) has a LOCAL api with a
+# signed Power Setpoint (positive = charge, negative = discharge, 0 = idle). The actual steering
+# of charge/discharge power is therefore implemented in the automation at the bottom of this
+# file with a single number.set_value call.
+#
+# Contents:
+#   1. template:      the fake Marstek M1 sensors / numbers / selects
+#   2. input_select:  helpers storing the HBC decisions
+#   3. input_number:  helpers storing the HBC decisions + battery specifications
+#   4. utility_meter: daily charged / discharged energy meters
+#   5. automation:    HBC forcible charge/discharge handler (writes the Power Setpoint)
+#
+# Prerequisites/Installation:
+# - Install the HBC Package, Dashboard and Node-RED strategy flows
+# - Configure HBC with one battery and a P1 Meter
+# - Install the "AECC Battery (Local TCP)" integration (HACS):
+#     https://github.com/fonske/aecc-battery-local  (fork of https://github.com/StekkerDeal/aecc-battery-local)
+#   Select brand "Voltdeer" during setup and give the device a friendly name.
+# - ENTITY NAMES: the integration builds entity ids from the friendly name you gave the device.
+#   This file assumes the device friendly name "AECC Battery" (the integration default), giving entities like:
+#     sensor.aecc_battery_battery_soc, sensor.aecc_battery_battery_power, sensor.aecc_battery_battery_status,
+#     number.aecc_battery_power_setpoint, select.aecc_battery_work_mode
+#   If you named it differently, search/replace "aecc_battery_" with your own prefix in this file
+#   (both in the templates and in the automation settings).
+# - Copy this file to the Home Assistant packages folder
+#   (same folder as house_battery_control.yaml and house_battery_control_config.yaml)
+# - Set the two helpers below to match your battery: capacity (kWh) and nominal voltage (V).
+# - Optionally adapt the "Settings" block in the automation (release to Self-Consumption, notifications).
+# - Restart Home Assistant or reload "All Yaml-configurations" (Developer tools)
+#
+# Power limits:
+# - The Max Charge / Max Discharge Power numbers below are read from the min/max attributes of
+#   number.aecc_battery_power_setpoint. Those are the "Max charge power" / "Max discharge power" you
+#   configured in the AECC integration (Configure button). Change them there, not here.
+# - Separately, the AECC app has an "On Grid Output" setting (factory default 800 W) that caps the
+#   inverter output. It is NOT reachable via local TCP. Raise it in the app if you want to
+#   discharge above 800 W (only on a dedicated circuit).
+# - The AECC battery (Local TCP) HA integration also needs to be configured seperately to go above 800 W.
+#   If not done during install (somewhat hidden feature during installation), change it after installing, in configuration
+#   in the integration in home assistant.
+#
+# Remark: The entities below are created with the specified default entity id (default_entity_id).
+#   The default_entity_id is only applied when the entity is first created for that unique_id.
+#   HBC relies on the exact entity names so check afterwards that the templates were created with
+#   the intended entity ids!
+#
+# Remark: This yaml only contains the M1 battery. For another slot make a copy and replace "m1" with "mx".
+
+# =============================================================================
+# 1. TEMPLATE ENTITIES: fake Marstek M1 interface
+# =============================================================================
+template:
+  - sensor:
+      # 0. Device Name: Fixed Name for the fake Marstek M1
+      # HBC displays the battery on the HBC dashboard as long as the Device Name is NOT 'unknown'
+      - name: "Marstek M1 Device Name (for AECC Battery)"
+        default_entity_id: sensor.marstek_m1_device_name
+        unique_id: marstek_m1_device_name_aecc_battery
+        icon: mdi:rename-box
+        state: >
+          {{ "Voltdeer SR5000 Pro" }}
+
+      # 1. State of Charge (SOC)
+      - name: "Marstek M1 Battery State Of Charge (for AECC Battery)"
+        default_entity_id: sensor.marstek_m1_battery_state_of_charge
+        unique_id: marstek_m1_battery_state_of_charge_aecc_battery
+        unit_of_measurement: "%"
+        icon: mdi:power-plug-battery-outline
+        device_class: battery
+        state_class: measurement
+        state: >
+          {% set val = states('sensor.aecc_battery_battery_soc') %}
+          {{ val | float(0) | round(0) | int if val not in ['unknown', 'unavailable'] else 0 }}
+
+      # 2. Battery Voltage
+      # The AECC integration does not expose a battery voltage, so the nominal voltage from the
+      # helper is returned (not used by HBC strategies).
+      - name: "Marstek M1 Battery Voltage (for AECC Battery)"
+        default_entity_id: sensor.marstek_m1_battery_voltage
+        unique_id: marstek_m1_battery_voltage_aecc_battery
+        unit_of_measurement: V
+        device_class: voltage
+        state_class: measurement
+        state: >
+          {{ states('input_number.marstek_m1_aecc_battery_helper_nominal_voltage') | float(0) }}
+
+      # 3. Battery Total Energy (kWh): taken from the capacity helper
+      - name: "Marstek M1 Battery Total Energy (for AECC Battery)"
+        default_entity_id: sensor.marstek_m1_battery_total_energy
+        unique_id: marstek_m1_battery_total_energy_aecc_battery
+        unit_of_measurement: kWh
+        device_class: energy_storage
+        state_class: measurement
+        state: >
+          {{ states('input_number.marstek_m1_aecc_battery_helper_capacity_kwh') | float(0) | round(2) }}
+
+      # 4a. AC Power (W): power delivered to the house
+      # Marstek convention: positive = discharge (delivering to the house), negative = charge.
+      # Voltdeer "Battery Power" is signed the other way round (positive = charging), so negate it.
+      - name: "Marstek M1 AC Power (for AECC Battery)"
+        default_entity_id: sensor.marstek_m1_ac_power
+        unique_id: marstek_m1_ac_power_aecc_battery
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        state: >
+          {% set p = states('sensor.aecc_battery_battery_power') %}
+          {{ (0 - (p | float(0))) | round(0) | int if p not in ['unknown', 'unavailable'] else 0 }}
+
+      # 4b. Battery Power (W): internal battery power
+      # Marstek convention: positive = charging the battery, negative = discharging.
+      # This matches the Voltdeer "Battery Power" sign, so pass it through.
+      - name: "Marstek M1 Battery Power (for AECC Battery)"
+        default_entity_id: sensor.marstek_m1_battery_power
+        unique_id: marstek_m1_battery_power_aecc_battery
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        state: >
+          {% set p = states('sensor.aecc_battery_battery_power') %}
+          {{ p | float(0) | round(0) | int if p not in ['unknown', 'unavailable'] else 0 }}
+
+      # 5a. Inverter State Number: derived from the Marstek M1 Battery Power (W)
+      # Battery Power: positive = charging, negative = discharging.
+      # A small dead band (-5 .. 10 W) is treated as Standby to ignore idle losses/noise.
+      # Marstek state numbers: 1=Standby, 2=Charge, 3=Discharge, 4=Fault (used for unavailable)
+      - name: "Marstek M1 Inverter State Number (for AECC Battery)"
+        default_entity_id: sensor.marstek_m1_inverter_state_number
+        unique_id: marstek_m1_inverter_state_number_aecc_battery
+        icon: mdi:state-machine
+        state_class: measurement
+        state: >
+          {% set raw = states('sensor.aecc_battery_battery_power') %}
+          {% if raw in ['unknown', 'unavailable', ''] %} 4
+          {% else %}
+            {% set p = states('sensor.marstek_m1_battery_power') | float(0) %}
+            {% if p > 10 %} 2
+            {% elif p < -5 %} 3
+            {% else %} 1
+            {% endif %}
+          {% endif %}
+
+      # 5b. Inverter State: text version of the state number (Marstek naming)
+      - name: "Marstek M1 Inverter State (for AECC Battery)"
+        default_entity_id: sensor.marstek_m1_inverter_state
+        unique_id: marstek_m1_inverter_state_aecc_battery
+        icon: mdi:state-machine
+        state: >
+          {% set state_nbr = states('sensor.marstek_m1_inverter_state_number') %}
+          {% set mapping = {
+            0: 'Sleep',
+            1: 'Standby',
+            2: 'Charge',
+            3: 'Discharge',
+            4: 'Fault',
+            5: 'Idle',
+            6: 'AC bypass'
+          } %}
+          {% if state_nbr not in ['unknown', 'unavailable', ''] %}
+            {{ mapping.get(state_nbr | int, 'Invalid state') }}
+          {% else %}
+            unknown
+          {% endif %}
+
+      # 6. Battery Remaining Energy (kWh): SOC x capacity
+      - name: "Marstek M1 Battery Remaining Capacity (for AECC Battery)"
+        default_entity_id: sensor.marstek_m1_battery_remaining_capacity
+        unique_id: marstek_m1_battery_remaining_capacity_aecc_battery
+        icon: mdi:battery-arrow-down-outline
+        unit_of_measurement: kWh
+        state_class: measurement
+        device_class: energy_storage
+        state: >
+          {% set soc = states('sensor.aecc_battery_battery_soc') %}
+          {% set cap = states('input_number.marstek_m1_aecc_battery_helper_capacity_kwh') | float(0) %}
+          {{ ((soc | float(0)) * cap / 100) | round(2) if soc not in ['unknown', 'unavailable'] else 0 }}
+
+      # 7. Lifetime round-trip efficiency (RTE) in %
+      # Uses the AECC "Energy lifetime Charged/Discharged" counters.
+      - name: "AECC battery Lifetime Energy RTE"
+        unique_id: aecc_battery_lifetime_energy_rte
+        icon: mdi:chart-bar
+        unit_of_measurement: "%"
+        state_class: measurement
+        state: >
+          {% set charging_raw = states('sensor.aecc_battery_lifetime_energy_charged') %}
+          {% set discharging_raw = states('sensor.aecc_battery_lifetime_energy_discharged') %}
+          {% if charging_raw not in ['unknown','unavailable',''] and discharging_raw not in ['unknown','unavailable',''] %}
+            {% set charging = charging_raw | float %}
+            {% set discharging = discharging_raw | float %}
+            {% if charging > 0 %}
+              {{ ((discharging / charging) * 100) | round(2) }}
+            {% else %}
+              unknown
+            {% endif %}
+          {% else %}
+            unknown
+          {% endif %}
+
+  - number:
+      # 11. Max Charge Power (W): read from the 'max' attribute of the Voltdeer Power Setpoint.
+      # This equals the "Max charge power" configured in the AECC integration. Not writable from here.
+      - name: "Marstek M1 Max Charge Power (for AECC Battery)"
+        default_entity_id: number.marstek_m1_max_charge_power
+        unique_id: marstek_m1_max_charge_power_aecc_battery
+        unit_of_measurement: W
+        icon: mdi:tune-variant
+        state: >
+          {{ state_attr('number.aecc_battery_power_setpoint', 'max') | int(2500) }}
+        min: 0
+        max: 2400
+        step: 100
+        set_value:
+          - stop: "Max charge power must be changed in the AECC integration (Configure)"
+
+      # 12. Max Discharge Power (W): read from the 'min' attribute (negated) of the Power Setpoint.
+      # This equals the "Max discharge power" configured in the AECC integration. Not writable from here.
+      - name: "Marstek M1 Max Discharge Power (for AECC Battery)"
+        default_entity_id: number.marstek_m1_max_discharge_power
+        unique_id: marstek_m1_max_discharge_power_aecc_battery
+        unit_of_measurement: W
+        icon: mdi:tune-variant
+        state: >
+          {{ (0 - (state_attr('number.aecc_battery_power_setpoint', 'min') | int(-2500))) }}
+        min: 0
+        max: 2400
+        step: 100
+        set_value:
+          - stop: "Max discharge power must be changed in the AECC integration (Configure)"
+
+      # 13. Forcible Charge Power: stored in a helper, applied by the automation
+      - name: "Marstek M1 Forcible Charge Power (for AECC Battery)"
+        default_entity_id: number.marstek_m1_forcible_charge_power
+        unique_id: marstek_m1_forcible_charge_power_aecc_battery
+        icon: mdi:tune-variant
+        unit_of_measurement: "W"
+        min: 0
+        max: 2400
+        step: 1
+        state: "{{ states('input_number.marstek_m1_aecc_battery_helper_forcible_charge_power') }}"
+        set_value:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.marstek_m1_aecc_battery_helper_forcible_charge_power
+            data:
+              value: "{{ value }}"
+
+      # 14. Forcible Discharge Power: stored in a helper, applied by the automation
+      - name: "Marstek M1 Forcible Discharge Power (for AECC Battery)"
+        default_entity_id: number.marstek_m1_forcible_discharge_power
+        unique_id: marstek_m1_forcible_discharge_power_aecc_battery
+        icon: mdi:tune-variant
+        unit_of_measurement: "W"
+        min: 0
+        max: 2400
+        step: 1
+        state: "{{ states('input_number.marstek_m1_aecc_battery_helper_forcible_discharge_power') }}"
+        set_value:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.marstek_m1_aecc_battery_helper_forcible_discharge_power
+            data:
+              value: "{{ value }}"
+
+      # 15. Charge to SOC: stored in a helper (HBC strategies currently do not use this).
+      # The Voltdeer does have a "Charge Limit" number (50-100 %), but it is not linked on purpose
+      # since changing it alters the battery's own max SOC protection.
+      - name: "Marstek M1 Charge To SOC Number (for AECC Battery)"
+        default_entity_id: number.marstek_m1_charge_to_soc
+        unique_id: marstek_m1_charge_to_soc_aecc_battery
+        unit_of_measurement: "%"
+        min: 11
+        max: 100
+        step: 1
+        state: "{{ states('input_number.marstek_m1_aecc_battery_helper_charge_to_soc') }}"
+        set_value:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.marstek_m1_aecc_battery_helper_charge_to_soc
+            data:
+              value: "{{ value }}"
+
+  - select:
+      # 21. RS485 Control Mode: 'enable' when HBC has Full Control, 'disable' otherwise.
+      # Stored in a helper; the automation stops the battery (setpoint 0) when this goes to 'disable'.
+      - name: "Marstek M1 RS485 Control Mode (for AECC Battery)"
+        default_entity_id: select.marstek_m1_rs485_control_mode
+        unique_id: marstek_m1_rs485_control_mode_aecc_battery
+        icon: mdi:connection
+        options: "{{ ['disable', 'enable'] }}"
+        state: "{{ states('input_select.marstek_m1_aecc_battery_helper_rs485_control_mode') }}"
+        select_option:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.marstek_m1_aecc_battery_helper_rs485_control_mode
+            data:
+              option: "{{ option }}"
+
+      # 22. User Work Mode: reads the Voltdeer Work Mode select.
+      #   Marstek 'manual'            <-> Voltdeer 'Custom / Manual'
+      #   Marstek 'anti-feed' / 'ai'  <-> Voltdeer 'Self-Consumption (AI)'
+      # Note: writing the Power Setpoint automatically switches the Voltdeer to 'Custom / Manual'.
+      #
+      # IMPORTANT: the HBC master switch flow (Node-RED, via the Supervisor proxy) writes
+      # 'manual' to this select EVERY 5 MINUTES while the HBC master mode is "Manual control".
+      # Forwarding that blindly would kick the battery out of Self-Consumption (AI) every 5 min.
+      # For a Voltdeer "Manual control" means "the user steers the battery via the AECC app",
+      # so 'manual' is only forwarded when HBC actually has control (RS485 control mode 'enable');
+      # otherwise it is ignored and the battery keeps whatever mode it is in.
+      # 'anti-feed' / 'ai' are always forwarded as Self-Consumption (AI).
+      - name: "Marstek M1 User Work Mode (for AECC Battery)"
+        default_entity_id: select.marstek_m1_user_work_mode
+        unique_id: marstek_m1_user_work_mode_aecc_battery
+        icon: mdi:auto-mode
+        options: "{{ ['manual', 'anti-feed', 'ai'] }}"
+        state: >
+          {% set wm = states('select.aecc_battery_work_mode') %}
+          {% if wm == 'Custom / Manual' %} manual
+          {% elif wm == 'Self-Consumption (AI)' %} anti-feed
+          {% else %} manual
+          {% endif %}
+        select_option:
+          - choose:
+              - conditions: >
+                  {{ option == 'manual'
+                     and states('input_select.marstek_m1_aecc_battery_helper_rs485_control_mode') == 'enable'
+                     and states('select.aecc_battery_work_mode') != 'Custom / Manual' }}
+                sequence:
+                  - action: select.select_option
+                    target:
+                      entity_id: select.aecc_battery_work_mode
+                    data:
+                      option: "Custom / Manual"
+              - conditions: >
+                  {{ option in ['anti-feed', 'ai']
+                     and states('select.aecc_battery_work_mode') != 'Self-Consumption (AI)' }}
+                sequence:
+                  - action: select.select_option
+                    target:
+                      entity_id: select.aecc_battery_work_mode
+                    data:
+                      option: "Self-Consumption (AI)"
+            # default: 'manual' while HBC has no control, or mode already set -> do nothing
+
+      # 23. Forcible Charge/Discharge: stored in a helper, applied by the automation
+      # together with the Forcible Charge/Discharge Power as one signed Power Setpoint.
+      - name: "Marstek M1 Forcible Charge/Discharge (for AECC Battery)"
+        default_entity_id: select.marstek_m1_forcible_charge_discharge
+        unique_id: marstek_m1_forcible_charge_discharge_aecc_battery
+        icon: mdi:arrow-up-down
+        options: "{{ ['stop', 'charge', 'discharge'] }}"
+        state: "{{ states('input_select.marstek_m1_aecc_battery_helper_forcible_charge_discharge') }}"
+        select_option:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.marstek_m1_aecc_battery_helper_forcible_charge_discharge
+            data:
+              option: "{{ option }}"
+
+# =============================================================================
+# 2./3. HELPERS storing the HBC decisions and the battery specifications
+# The automation at the bottom of this file watches these helpers and writes the
+# resulting signed Power Setpoint to the Voltdeer.
+# =============================================================================
+input_select:
+  marstek_m1_aecc_battery_helper_rs485_control_mode:
+    name: "Marstek RS485 Control Mode Helper (for AECC Battery)"
+    icon: mdi:database-import
+    options:
+      - "disable"
+      - "enable"
+
+  marstek_m1_aecc_battery_helper_forcible_charge_discharge:
+    name: "Marstek Forcible Charge/Discharge Helper (for AECC Battery)"
+    icon: mdi:database-import
+    options:
+      - "stop"
+      - "charge"
+      - "discharge"
+
+input_number:
+  marstek_m1_aecc_battery_helper_forcible_charge_power:
+    name: "Marstek Forcible Charge Power Helper (for AECC Battery)"
+    icon: mdi:database-import
+    initial: 0
+    min: 0
+    max: 2400
+    unit_of_measurement: "W"
+
+  marstek_m1_aecc_battery_helper_forcible_discharge_power:
+    name: "Marstek Forcible Discharge Power Helper (for AECC Battery)"
+    icon: mdi:database-import
+    initial: 0
+    min: 0
+    max: 2400
+    unit_of_measurement: "W"
+
+  marstek_m1_aecc_battery_helper_charge_to_soc:
+    name: "Marstek Charge To SOC Helper (for AECC Battery)"
+    icon: mdi:database-import
+    initial: 11
+    min: 11
+    max: 100
+    unit_of_measurement: "%"
+
+  # Battery specifications (adapt to your unit). The AECC integration does not expose these.
+  marstek_m1_aecc_battery_helper_capacity_kwh:
+    name: "AECC Battery Capacity (kWh)"
+    icon: mdi:battery-high
+    initial: 5.12
+    min: 0.5
+    max: 50
+    step: 0.01
+    unit_of_measurement: "kWh"
+
+  marstek_m1_aecc_battery_helper_nominal_voltage:
+    name: "AECC Battery Nominal Voltage (V)"
+    icon: mdi:flash
+    initial: 51.2
+    min: 0
+    max: 600
+    step: 0.1
+    unit_of_measurement: "V"
+
+# =============================================================================
+# 4. DAILY ENERGY METERS (utility meters with daily reset) based on the AECC
+# accumulated energy sensors (total_increasing). Entity ids are derived from the keys below.
+# =============================================================================
+utility_meter:
+  aecc_battery_energy_charged_today:
+    name: "AECC battery energy charged today"
+    source: sensor.aecc_battery_lifetime_energy_charged
+    cycle: daily
+
+  aecc_battery_energy_discharged_today:
+    name: "AECC battery energy discharged today"
+    source: sensor.aecc_battery_lifetime_energy_discharged
+    cycle: daily
+
+# =============================================================================
+# 5. AUTOMATION: HBC Forcible Charge/Discharge Handler (for Voltdeer SR5000 Pro)
+# =============================================================================
+automation:
+  - id: hbc_marstek_m1_aecc_battery_charge_discharge
+    alias: HBC AECC Battery Charge or Discharge Event for M1 Battery
+    description: >-
+      ### HBC Forcible Charge/Discharge Handler (for Voltdeer SR5000 Pro)
+
+      Applies the decisions of Home Battery Control (HBC) to a Voltdeer SR5000 Pro
+      via the AECC Battery (Local TCP) integration. Part of the 'AECC Battery to M1
+      Marstek' package (this file), which also defines the fake Marstek M1 entities
+      and the helpers this automation reads.
+
+      HBC writes 4 output entities on the fake Marstek M1: RS485 Control Mode
+      (enable/disable), Forcible Charge/Discharge (charge/discharge/stop),
+      Forcible Charge Power and Forcible Discharge Power. The package stores those
+      in helpers; this automation reads the helpers and translates them into ONE
+      signed Power Setpoint on the Voltdeer:
+
+        +power  = charge, -power = discharge, 0 = idle/stop
+
+      Writing the Power Setpoint automatically puts the Voltdeer in 'Custom /
+      Manual' mode, so no separate mode switching is needed. Control mode 'disable'
+      or Forcible mode 'stop' both result in setpoint 0.
+
+      Optional: set RELEASE_TO_SELF_CONSUMPTION to true to hand the battery back to
+      its own Self-Consumption (AI) mode when HBC releases control (control mode
+      'disable'), instead of holding it at 0 W.
+
+      Power is clamped to the Max charge/discharge power configured in the AECC
+      integration (read from the min/max attributes of the setpoint). Remember the
+      AECC app 'On Grid Output' cap (default 800 W, raise to 2400 W in the app) also applies to discharge.
+
+      Mode is 'restart': HBC changes mode and power in quick succession, so a
+      second trigger simply restarts the run and the final write uses the latest
+      helper values.
+
+    triggers:
+      - trigger: state
+        entity_id:
+          - input_select.marstek_m1_aecc_battery_helper_forcible_charge_discharge
+        id: Forcible-Mode
+      - trigger: state
+        entity_id:
+          - input_select.marstek_m1_aecc_battery_helper_rs485_control_mode
+        id: Control-Mode
+      - trigger: state
+        entity_id:
+          - input_number.marstek_m1_aecc_battery_helper_forcible_charge_power
+        id: Charge-Power
+      - trigger: state
+        entity_id:
+          - input_number.marstek_m1_aecc_battery_helper_forcible_discharge_power
+        id: Discharge-Power
+    conditions: []
+    actions:
+      - alias: Small delay so HBC can finish writing mode and power
+        delay:
+          milliseconds: 500
+
+      - alias: Settings (adapt to your setup)
+        variables:
+          AECC_BATTERY_SETPOINT_ENTITY: number.aecc_battery_power_setpoint
+          AECC_BATTERY_WORK_MODE_ENTITY: select.aecc_battery_work_mode
+          AECC_BATTERY_SELF_CONSUMPTION_OPTION: "Self-Consumption (AI)"
+          RELEASE_TO_SELF_CONSUMPTION: false
+          NOTIFY_ENABLED: false
+          NOTIFY_SERVICE: notify.mobile_app_your_phone
+
+      - alias: Retrieve current HBC states as variables
+        variables:
+          hbc_ctrl: "{{ states('input_select.marstek_m1_aecc_battery_helper_rs485_control_mode') }}"
+          hbc_mode: "{{ states('input_select.marstek_m1_aecc_battery_helper_forcible_charge_discharge') }}"
+          hbc_charge_power: "{{ states('input_number.marstek_m1_aecc_battery_helper_forcible_charge_power') | int(0) }}"
+          hbc_discharge_power: "{{ states('input_number.marstek_m1_aecc_battery_helper_forcible_discharge_power') | int(0) }}"
+          max_charge: "{{ state_attr(AECC_BATTERY_SETPOINT_ENTITY, 'max') | int(2400) }}"
+          max_discharge: "{{ (0 - (state_attr(AECC_BATTERY_SETPOINT_ENTITY, 'min') | int(-2400))) }}"
+          current_setpoint: "{{ states(AECC_BATTERY_SETPOINT_ENTITY) | int(0) }}"
+
+      - alias: Determine the target setpoint (signed, positive = charge)
+        variables:
+          target_charge: "{{ (hbc_ctrl == 'enable') and (hbc_mode == 'charge') }}"
+          target_discharge: "{{ (hbc_ctrl == 'enable') and (hbc_mode == 'discharge') }}"
+          target_release: "{{ (hbc_ctrl == 'disable') and RELEASE_TO_SELF_CONSUMPTION }}"
+          target_setpoint: >-
+            {% if target_charge %}
+              {{ ([hbc_charge_power | int(0), max_charge | int(0)] | min) | int }}
+            {% elif target_discharge %}
+              {{ (0 - ([hbc_discharge_power | int(0), max_discharge | int(0)] | min)) | int }}
+            {% else %}
+              0
+            {% endif %}
+          hbc_state_message: >-
+            HBC at {{ now().strftime('%Y-%m-%d %H:%M:%S') }}: Control={{ hbc_ctrl }},
+            Mode={{ hbc_mode }}, Charge={{ hbc_charge_power }} W, Discharge={{ hbc_discharge_power }} W.
+            Trigger '{{ trigger.id | default('n/a') }}'. Setpoint {{ current_setpoint }} -> {{ target_setpoint }} W.
+
+      - alias: Hand control back to the battery (Self-Consumption) when HBC releases control
+        if:
+          - condition: template
+            value_template: "{{ target_release }}"
+        then:
+          - alias: Set the Voltdeer to Self-Consumption (AI)
+            if:
+              - condition: template
+                value_template: "{{ states(AECC_BATTERY_WORK_MODE_ENTITY) != AECC_BATTERY_SELF_CONSUMPTION_OPTION }}"
+            then:
+              - action: select.select_option
+                target:
+                  entity_id: "{{ AECC_BATTERY_WORK_MODE_ENTITY }}"
+                data:
+                  option: "{{ AECC_BATTERY_SELF_CONSUMPTION_OPTION }}"
+        else:
+          - alias: Write the setpoint only when it differs from the current value
+            if:
+              - condition: template
+                value_template: "{{ current_setpoint != target_setpoint }}"
+            then:
+              - alias: Write the signed Power Setpoint to the Voltdeer
+                action: number.set_value
+                target:
+                  entity_id: "{{ AECC_BATTERY_SETPOINT_ENTITY }}"
+                data:
+                  value: "{{ target_setpoint }}"
+
+      - alias: Optional notification
+        if:
+          - condition: template
+            value_template: "{{ NOTIFY_ENABLED }}"
+        then:
+          - action: "{{ NOTIFY_SERVICE }}"
+            data:
+              title: HBC AECC Battery M1
+              message: "{{ hbc_state_message }}"
+    mode: restart

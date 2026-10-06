@@ -1,0 +1,198 @@
+type: masonry
+path: aecc
+title: AECC battery
+icon: mdi:home-battery-outline
+cards:
+  - type: vertical-stack
+    cards:
+      - type: horizontal-stack
+        cards:
+          - type: gauge
+            entity: sensor.p1_meter_power
+            name: P1 meter
+            needle: true
+            max: 7000
+            severity:
+              green: -7000
+              yellow: 0
+              red: 0
+            min: -7000
+          - type: gauge
+            entity: sensor.aecc_battery_battery_power
+            name: Battery Power
+            needle: true
+            max: 2500
+            severity:
+              green: -2500
+              yellow: 0
+              red: 0
+            min: -2500
+          - type: gauge
+            entity: sensor.aecc_battery_battery_soc
+            name: SoC
+            needle: true
+            max: 100
+            severity:
+              green: 66
+              yellow: 33
+              red: 0
+            min: 0
+  - type: entities
+    entities:
+      - entity: sensor.aecc_battery_battery_soc
+        name: Battery SOC
+      - entity: sensor.aecc_battery_battery_power
+        name: Battery Power
+      - entity: sensor.marstek_m1_battery_remaining_capacity
+        name: Battery capacity
+      - entity: sensor.aecc_battery_battery_status
+        name: Battery Status
+      - entity: sensor.aecc_battery_ac_charging_power
+        name: AC Charging Power
+      - entity: sensor.aecc_battery_battery_discharging_power
+        name: Battery Discharging Power
+      - entity: sensor.aecc_battery_available_charge_power
+        name: Available Charge Power
+      - entity: sensor.aecc_battery_backup_power
+        name: Backup Power
+      - entity: sensor.aecc_battery_energy_charged
+        name: Energy Charged
+      - entity: sensor.aecc_battery_energy_charged_today
+        name: Energy charged today
+      - entity: sensor.aecc_battery_energy_discharged
+        name: Energy Discharged
+      - entity: sensor.aecc_battery_energy_discharged_today
+        name: Energy discharged today
+      - entity: sensor.aecc_battery_energy_generated
+        name: Energy Generated
+      - entity: binary_sensor.aecc_battery_fault
+        name: Fault
+      - entity: sensor.aecc_battery_grid_meter_power
+        name: Grid / Meter Power
+      - entity: sensor.aecc_battery_grid_export_power
+        name: Grid Export Power
+      - entity: sensor.aecc_battery_lifetime_energy_charged
+        name: Lifetime Energy Charged
+      - entity: sensor.aecc_battery_lifetime_energy_discharged
+        name: Lifetime Energy Discharged
+      - entity: sensor.aecc_battery_lifetime_energy_rte
+      - entity: sensor.aecc_battery_lifetime_energy_to_grid
+        name: Lifetime Energy to Grid
+      - entity: sensor.aecc_battery_pv_power
+        name: PV Power
+      - entity: sensor.aecc_battery_pv_charging_power
+        name: PV Charging Power
+      - entity: sensor.aecc_battery_pv_string_1_power
+        name: PV String 1 Power
+      - entity: sensor.aecc_battery_pv_string_2_power
+        name: PV String 2 Power
+  - type: history-graph
+    entities:
+      - entity: sensor.aecc_battery_battery_soc
+      - entity: sensor.aecc_battery_battery_power
+    title: Geschiedenis
+    hours_to_show: 46
+  - type: vertical-stack
+    cards:
+      - type: custom:apexcharts-card
+        header:
+          title: My Battery Energy - Laatste 7 Dagen
+          show: true
+        graph_span: 7d
+        yaxis:
+          - id: first
+            min: 0
+            max: 6
+            decimals: 0
+            apex_config:
+              tickAmount: 6
+          - id: second
+            min: 0
+            max: 100
+            opposite: true
+            decimals: 0
+            apex_config:
+              tickAmount: 10
+        span:
+          start: day
+          offset: -6d
+        series:
+          - entity: sensor.aecc_battery_energy_charged_today
+            name: Lading (kWh)
+            type: column
+            color: '#FF4500'
+            group_by:
+              func: last
+              duration: 1d
+            show:
+              in_header: true
+              legend_value: true
+            yaxis_id: first
+          - entity: sensor.aecc_battery_energy_discharged_today
+            name: Ontlading (kWh)
+            type: column
+            color: '#CCD500'
+            group_by:
+              func: last
+              duration: 1d
+            show:
+              in_header: true
+              legend_value: true
+            yaxis_id: first
+        apex_config:
+          xaxis:
+            title:
+              text: Datum
+            type: datetime
+          plotOptions:
+            bar:
+              horizontal: false
+          dataLabels:
+            enabled: false
+          stroke:
+            show: true
+            width: 2
+          tooltip:
+            enabled: true
+            shared: true
+          grid:
+            show: true
+  - type: entities
+    entities:
+      - entity: number.aecc_battery_charge_limit
+        name: Charge Limit
+      - entity: number.aecc_battery_discharge_limit
+        name: Discharge Limit
+      - entity: number.aecc_battery_power_setpoint
+        name: Power Setpoint
+      - entity: select.aecc_battery_work_mode
+        name: Work Mode
+      - entity: select.marstek_m1_rs485_control_mode
+        name: HBC control mode (M1)
+      - entity: select.marstek_m1_forcible_charge_discharge
+        name: HBC forcible charge/discharge (M1)
+  - type: entities
+    entities:
+      - entity: sensor.aecc_battery_alarm_flags
+        name: Alarm Flags
+      - entity: sensor.aecc_battery_firmware_version
+        name: Firmware Version
+      - entity: sensor.aecc_battery_nominal_battery_power
+        name: Nominal Battery Power
+      - entity: sensor.aecc_battery_nominal_power
+        name: Nominal Power
+      - entity: sensor.aecc_battery_inverter_temperature
+        name: Inverter Temperature
+      - entity: sensor.aecc_battery_pv_radiator_temperature
+        name: Radiator Temperature
+      - entity: sensor.aecc_battery_transformer_temperature
+        name: Transformer Temperature
+      - entity: sensor.aecc_battery_wifi_signal
+        name: WiFi Signal
+badges:
+  - type: entity
+    entity: input_select.house_battery_strategy
+    show_name: true
+  - type: entity
+    entity: input_text.house_battery_strategy_active_sub_strategy
+    show_name: true

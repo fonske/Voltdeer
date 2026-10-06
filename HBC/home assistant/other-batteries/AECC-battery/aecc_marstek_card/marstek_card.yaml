@@ -1,0 +1,957 @@
+type: horizontal-stack
+cards:
+  - type: picture-elements
+    image:
+      media_content_id: media-source://media_source/local/marstek_e_dark.png
+      media_content_type: image/png
+    elements:
+      - type: custom:button-card
+        entity: sensor.marstek_m1_battery_state_of_charge
+        triggers_update:
+          - sensor.marstek_m1_ac_power
+        show_name: false
+        show_icon: false
+        show_state: false
+        show_label: false
+        tap_action:
+          action: none
+        hold_action:
+          action: none
+        styles:
+          card:
+            - width: 24px
+            - height: 3px
+            - min-height: 3px
+            - padding: 0
+            - margin: 0
+            - border: none
+            - border-radius: 3px 0 0 3px
+            - transition: background 0.6s ease
+            - background: |
+                [[[
+                  // ---- CONFIG (identical in every segment) ----
+                  // If your power sensor is negative while charging, set
+                  // POWER_POSITIVE_IS_CHARGING = false.
+                  const CHARGE_ENTITY = 'sensor.marstek_m1_ac_power';     // W, positive = charging
+                  const POWER_POSITIVE_IS_CHARGING = true;
+                  const POWER_DEADBAND_W = 20;
+                  const CHARGING_STATES = ['on', 'charging', 'charge'];
+                  const FAULT_ENTITY = '';
+                  const FAULT_STATES = ['on', 'fault', 'error', 'problem'];
+                  const ICE_BLUE = '79,195,247';
+                  const RED = '244,67,54';
+                  const OFF = '#2a2a2a';
+                  const IDX = 0;                      // this segment, 0..4
+                  // ---------------------------------------------
+                  const soc = parseFloat(entity ? entity.state : 'x');
+                  const seg = ['off','off','off','off','off'];
+                  let rgb = ICE_BLUE;
+                  const fst = FAULT_ENTITY && states[FAULT_ENTITY] ? states[FAULT_ENTITY].state : undefined;
+                  if (fst !== undefined && FAULT_STATES.includes(String(fst).toLowerCase())) {
+                    rgb = RED; seg.fill('on');
+                  } else if (!isNaN(soc)) {
+                    let charging = false;
+                    const cst = CHARGE_ENTITY && states[CHARGE_ENTITY] ? states[CHARGE_ENTITY].state : undefined;
+                    if (cst !== undefined) {
+                      const w = parseFloat(cst);
+                      if (!isNaN(w)) charging = POWER_POSITIVE_IS_CHARGING ? w > POWER_DEADBAND_W : w < -POWER_DEADBAND_W;
+                      else charging = CHARGING_STATES.includes(String(cst).toLowerCase());
+                    }
+                    const pct = Math.max(0, Math.min(100, soc));
+                    if (charging && pct < 100) {
+                      const solid = Math.max(0, Math.ceil(pct / 20) - 1);
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                      seg[solid] = 'f1';
+                    } else if (pct >= 100) {
+                      seg.fill('on');
+                    } else if (pct <= 10) {
+                      seg[0] = 'f4';
+                    } else {
+                      const solid = Math.max(1, Math.ceil(pct / 20));
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                    }
+                  }
+                  const s = seg[IDX];
+                  const lit = s !== 'off';
+                  return lit ? 'rgb(' + rgb + ')' : OFF;
+                ]]]
+            - box-shadow: |
+                [[[
+                  // ---- CONFIG (identical in every segment) ----
+                  // If your power sensor is negative while charging, set
+                  // POWER_POSITIVE_IS_CHARGING = false.
+                  const CHARGE_ENTITY = 'sensor.marstek_m1_ac_power';     // W, positive = charging
+                  const POWER_POSITIVE_IS_CHARGING = true;
+                  const POWER_DEADBAND_W = 20;
+                  const CHARGING_STATES = ['on', 'charging', 'charge'];
+                  const FAULT_ENTITY = '';
+                  const FAULT_STATES = ['on', 'fault', 'error', 'problem'];
+                  const ICE_BLUE = '79,195,247';
+                  const RED = '244,67,54';
+                  const OFF = '#2a2a2a';
+                  const IDX = 0;                      // this segment, 0..4
+                  // ---------------------------------------------
+                  const soc = parseFloat(entity ? entity.state : 'x');
+                  const seg = ['off','off','off','off','off'];
+                  let rgb = ICE_BLUE;
+                  const fst = FAULT_ENTITY && states[FAULT_ENTITY] ? states[FAULT_ENTITY].state : undefined;
+                  if (fst !== undefined && FAULT_STATES.includes(String(fst).toLowerCase())) {
+                    rgb = RED; seg.fill('on');
+                  } else if (!isNaN(soc)) {
+                    let charging = false;
+                    const cst = CHARGE_ENTITY && states[CHARGE_ENTITY] ? states[CHARGE_ENTITY].state : undefined;
+                    if (cst !== undefined) {
+                      const w = parseFloat(cst);
+                      if (!isNaN(w)) charging = POWER_POSITIVE_IS_CHARGING ? w > POWER_DEADBAND_W : w < -POWER_DEADBAND_W;
+                      else charging = CHARGING_STATES.includes(String(cst).toLowerCase());
+                    }
+                    const pct = Math.max(0, Math.min(100, soc));
+                    if (charging && pct < 100) {
+                      const solid = Math.max(0, Math.ceil(pct / 20) - 1);
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                      seg[solid] = 'f1';
+                    } else if (pct >= 100) {
+                      seg.fill('on');
+                    } else if (pct <= 10) {
+                      seg[0] = 'f4';
+                    } else {
+                      const solid = Math.max(1, Math.ceil(pct / 20));
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                    }
+                  }
+                  const s = seg[IDX];
+                  const lit = s !== 'off';
+                  return lit ? '0 0 8px rgba(' + rgb + ',0.85)' : 'none';
+                ]]]
+            - animation: |
+                [[[
+                  // ---- CONFIG (identical in every segment) ----
+                  // If your power sensor is negative while charging, set
+                  // POWER_POSITIVE_IS_CHARGING = false.
+                  const CHARGE_ENTITY = 'sensor.marstek_m1_ac_power';     // W, positive = charging
+                  const POWER_POSITIVE_IS_CHARGING = true;
+                  const POWER_DEADBAND_W = 20;
+                  const CHARGING_STATES = ['on', 'charging', 'charge'];
+                  const FAULT_ENTITY = '';
+                  const FAULT_STATES = ['on', 'fault', 'error', 'problem'];
+                  const ICE_BLUE = '79,195,247';
+                  const RED = '244,67,54';
+                  const OFF = '#2a2a2a';
+                  const IDX = 0;                      // this segment, 0..4
+                  // ---------------------------------------------
+                  const soc = parseFloat(entity ? entity.state : 'x');
+                  const seg = ['off','off','off','off','off'];
+                  let rgb = ICE_BLUE;
+                  const fst = FAULT_ENTITY && states[FAULT_ENTITY] ? states[FAULT_ENTITY].state : undefined;
+                  if (fst !== undefined && FAULT_STATES.includes(String(fst).toLowerCase())) {
+                    rgb = RED; seg.fill('on');
+                  } else if (!isNaN(soc)) {
+                    let charging = false;
+                    const cst = CHARGE_ENTITY && states[CHARGE_ENTITY] ? states[CHARGE_ENTITY].state : undefined;
+                    if (cst !== undefined) {
+                      const w = parseFloat(cst);
+                      if (!isNaN(w)) charging = POWER_POSITIVE_IS_CHARGING ? w > POWER_DEADBAND_W : w < -POWER_DEADBAND_W;
+                      else charging = CHARGING_STATES.includes(String(cst).toLowerCase());
+                    }
+                    const pct = Math.max(0, Math.min(100, soc));
+                    if (charging && pct < 100) {
+                      const solid = Math.max(0, Math.ceil(pct / 20) - 1);
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                      seg[solid] = 'f1';
+                    } else if (pct >= 100) {
+                      seg.fill('on');
+                    } else if (pct <= 10) {
+                      seg[0] = 'f4';
+                    } else {
+                      const solid = Math.max(1, Math.ceil(pct / 20));
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                    }
+                  }
+                  const s = seg[IDX];
+                  const lit = s !== 'off';
+                  if (s === 'f1') return 'soc_flash 1s step-end infinite';
+                  if (s === 'f4') return 'soc_flash 4s step-end infinite';
+                  return 'none';
+                ]]]
+        extra_styles: |
+          @keyframes soc_flash {
+            0%   { opacity: 1; }
+            50%  { opacity: 0; }
+            100% { opacity: 1; }
+          }
+        style:
+          left: calc(50% - 48px)
+          top: 19.8%
+          transform: translate(-50%, -50%)
+          z-index: 6
+      - type: custom:button-card
+        entity: sensor.marstek_m1_battery_state_of_charge
+        triggers_update:
+          - sensor.marstek_m1_ac_power
+        show_name: false
+        show_icon: false
+        show_state: false
+        show_label: false
+        tap_action:
+          action: none
+        hold_action:
+          action: none
+        styles:
+          card:
+            - width: 24px
+            - height: 3px
+            - min-height: 3px
+            - padding: 0
+            - margin: 0
+            - border: none
+            - border-radius: 0
+            - transition: background 0.6s ease
+            - background: |
+                [[[
+                  // ---- CONFIG (identical in every segment) ----
+                  // If your power sensor is negative while charging, set
+                  // POWER_POSITIVE_IS_CHARGING = false.
+                  const CHARGE_ENTITY = 'sensor.marstek_m1_ac_power';     // W, positive = charging
+                  const POWER_POSITIVE_IS_CHARGING = true;
+                  const POWER_DEADBAND_W = 20;
+                  const CHARGING_STATES = ['on', 'charging', 'charge'];
+                  const FAULT_ENTITY = '';
+                  const FAULT_STATES = ['on', 'fault', 'error', 'problem'];
+                  const ICE_BLUE = '79,195,247';
+                  const RED = '244,67,54';
+                  const OFF = '#2a2a2a';
+                  const IDX = 1;                      // this segment, 0..4
+                  // ---------------------------------------------
+                  const soc = parseFloat(entity ? entity.state : 'x');
+                  const seg = ['off','off','off','off','off'];
+                  let rgb = ICE_BLUE;
+                  const fst = FAULT_ENTITY && states[FAULT_ENTITY] ? states[FAULT_ENTITY].state : undefined;
+                  if (fst !== undefined && FAULT_STATES.includes(String(fst).toLowerCase())) {
+                    rgb = RED; seg.fill('on');
+                  } else if (!isNaN(soc)) {
+                    let charging = false;
+                    const cst = CHARGE_ENTITY && states[CHARGE_ENTITY] ? states[CHARGE_ENTITY].state : undefined;
+                    if (cst !== undefined) {
+                      const w = parseFloat(cst);
+                      if (!isNaN(w)) charging = POWER_POSITIVE_IS_CHARGING ? w > POWER_DEADBAND_W : w < -POWER_DEADBAND_W;
+                      else charging = CHARGING_STATES.includes(String(cst).toLowerCase());
+                    }
+                    const pct = Math.max(0, Math.min(100, soc));
+                    if (charging && pct < 100) {
+                      const solid = Math.max(0, Math.ceil(pct / 20) - 1);
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                      seg[solid] = 'f1';
+                    } else if (pct >= 100) {
+                      seg.fill('on');
+                    } else if (pct <= 10) {
+                      seg[0] = 'f4';
+                    } else {
+                      const solid = Math.max(1, Math.ceil(pct / 20));
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                    }
+                  }
+                  const s = seg[IDX];
+                  const lit = s !== 'off';
+                  return lit ? 'rgb(' + rgb + ')' : OFF;
+                ]]]
+            - box-shadow: |
+                [[[
+                  // ---- CONFIG (identical in every segment) ----
+                  // If your power sensor is negative while charging, set
+                  // POWER_POSITIVE_IS_CHARGING = false.
+                  const CHARGE_ENTITY = 'sensor.marstek_m1_ac_power';     // W, positive = charging
+                  const POWER_POSITIVE_IS_CHARGING = true;
+                  const POWER_DEADBAND_W = 20;
+                  const CHARGING_STATES = ['on', 'charging', 'charge'];
+                  const FAULT_ENTITY = '';
+                  const FAULT_STATES = ['on', 'fault', 'error', 'problem'];
+                  const ICE_BLUE = '79,195,247';
+                  const RED = '244,67,54';
+                  const OFF = '#2a2a2a';
+                  const IDX = 1;                      // this segment, 0..4
+                  // ---------------------------------------------
+                  const soc = parseFloat(entity ? entity.state : 'x');
+                  const seg = ['off','off','off','off','off'];
+                  let rgb = ICE_BLUE;
+                  const fst = FAULT_ENTITY && states[FAULT_ENTITY] ? states[FAULT_ENTITY].state : undefined;
+                  if (fst !== undefined && FAULT_STATES.includes(String(fst).toLowerCase())) {
+                    rgb = RED; seg.fill('on');
+                  } else if (!isNaN(soc)) {
+                    let charging = false;
+                    const cst = CHARGE_ENTITY && states[CHARGE_ENTITY] ? states[CHARGE_ENTITY].state : undefined;
+                    if (cst !== undefined) {
+                      const w = parseFloat(cst);
+                      if (!isNaN(w)) charging = POWER_POSITIVE_IS_CHARGING ? w > POWER_DEADBAND_W : w < -POWER_DEADBAND_W;
+                      else charging = CHARGING_STATES.includes(String(cst).toLowerCase());
+                    }
+                    const pct = Math.max(0, Math.min(100, soc));
+                    if (charging && pct < 100) {
+                      const solid = Math.max(0, Math.ceil(pct / 20) - 1);
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                      seg[solid] = 'f1';
+                    } else if (pct >= 100) {
+                      seg.fill('on');
+                    } else if (pct <= 10) {
+                      seg[0] = 'f4';
+                    } else {
+                      const solid = Math.max(1, Math.ceil(pct / 20));
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                    }
+                  }
+                  const s = seg[IDX];
+                  const lit = s !== 'off';
+                  return lit ? '0 0 8px rgba(' + rgb + ',0.85)' : 'none';
+                ]]]
+            - animation: |
+                [[[
+                  // ---- CONFIG (identical in every segment) ----
+                  // If your power sensor is negative while charging, set
+                  // POWER_POSITIVE_IS_CHARGING = false.
+                  const CHARGE_ENTITY = 'sensor.marstek_m1_ac_power';     // W, positive = charging
+                  const POWER_POSITIVE_IS_CHARGING = true;
+                  const POWER_DEADBAND_W = 20;
+                  const CHARGING_STATES = ['on', 'charging', 'charge'];
+                  const FAULT_ENTITY = '';
+                  const FAULT_STATES = ['on', 'fault', 'error', 'problem'];
+                  const ICE_BLUE = '79,195,247';
+                  const RED = '244,67,54';
+                  const OFF = '#2a2a2a';
+                  const IDX = 1;                      // this segment, 0..4
+                  // ---------------------------------------------
+                  const soc = parseFloat(entity ? entity.state : 'x');
+                  const seg = ['off','off','off','off','off'];
+                  let rgb = ICE_BLUE;
+                  const fst = FAULT_ENTITY && states[FAULT_ENTITY] ? states[FAULT_ENTITY].state : undefined;
+                  if (fst !== undefined && FAULT_STATES.includes(String(fst).toLowerCase())) {
+                    rgb = RED; seg.fill('on');
+                  } else if (!isNaN(soc)) {
+                    let charging = false;
+                    const cst = CHARGE_ENTITY && states[CHARGE_ENTITY] ? states[CHARGE_ENTITY].state : undefined;
+                    if (cst !== undefined) {
+                      const w = parseFloat(cst);
+                      if (!isNaN(w)) charging = POWER_POSITIVE_IS_CHARGING ? w > POWER_DEADBAND_W : w < -POWER_DEADBAND_W;
+                      else charging = CHARGING_STATES.includes(String(cst).toLowerCase());
+                    }
+                    const pct = Math.max(0, Math.min(100, soc));
+                    if (charging && pct < 100) {
+                      const solid = Math.max(0, Math.ceil(pct / 20) - 1);
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                      seg[solid] = 'f1';
+                    } else if (pct >= 100) {
+                      seg.fill('on');
+                    } else if (pct <= 10) {
+                      seg[0] = 'f4';
+                    } else {
+                      const solid = Math.max(1, Math.ceil(pct / 20));
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                    }
+                  }
+                  const s = seg[IDX];
+                  const lit = s !== 'off';
+                  if (s === 'f1') return 'soc_flash 1s step-end infinite';
+                  if (s === 'f4') return 'soc_flash 4s step-end infinite';
+                  return 'none';
+                ]]]
+        extra_styles: |
+          @keyframes soc_flash {
+            0%   { opacity: 1; }
+            50%  { opacity: 0; }
+            100% { opacity: 1; }
+          }
+        style:
+          left: calc(50% - 24px)
+          top: 19.8%
+          transform: translate(-50%, -50%)
+          z-index: 6
+      - type: custom:button-card
+        entity: sensor.marstek_m1_battery_state_of_charge
+        triggers_update:
+          - sensor.marstek_m1_ac_power
+        show_name: false
+        show_icon: false
+        show_state: false
+        show_label: false
+        tap_action:
+          action: none
+        hold_action:
+          action: none
+        styles:
+          card:
+            - width: 24px
+            - height: 3px
+            - min-height: 3px
+            - padding: 0
+            - margin: 0
+            - border: none
+            - border-radius: 0
+            - transition: background 0.6s ease
+            - background: |
+                [[[
+                  // ---- CONFIG (identical in every segment) ----
+                  // If your power sensor is negative while charging, set
+                  // POWER_POSITIVE_IS_CHARGING = false.
+                  const CHARGE_ENTITY = 'sensor.marstek_m1_ac_power';     // W, positive = charging
+                  const POWER_POSITIVE_IS_CHARGING = true;
+                  const POWER_DEADBAND_W = 20;
+                  const CHARGING_STATES = ['on', 'charging', 'charge'];
+                  const FAULT_ENTITY = '';
+                  const FAULT_STATES = ['on', 'fault', 'error', 'problem'];
+                  const ICE_BLUE = '79,195,247';
+                  const RED = '244,67,54';
+                  const OFF = '#2a2a2a';
+                  const IDX = 2;                      // this segment, 0..4
+                  // ---------------------------------------------
+                  const soc = parseFloat(entity ? entity.state : 'x');
+                  const seg = ['off','off','off','off','off'];
+                  let rgb = ICE_BLUE;
+                  const fst = FAULT_ENTITY && states[FAULT_ENTITY] ? states[FAULT_ENTITY].state : undefined;
+                  if (fst !== undefined && FAULT_STATES.includes(String(fst).toLowerCase())) {
+                    rgb = RED; seg.fill('on');
+                  } else if (!isNaN(soc)) {
+                    let charging = false;
+                    const cst = CHARGE_ENTITY && states[CHARGE_ENTITY] ? states[CHARGE_ENTITY].state : undefined;
+                    if (cst !== undefined) {
+                      const w = parseFloat(cst);
+                      if (!isNaN(w)) charging = POWER_POSITIVE_IS_CHARGING ? w > POWER_DEADBAND_W : w < -POWER_DEADBAND_W;
+                      else charging = CHARGING_STATES.includes(String(cst).toLowerCase());
+                    }
+                    const pct = Math.max(0, Math.min(100, soc));
+                    if (charging && pct < 100) {
+                      const solid = Math.max(0, Math.ceil(pct / 20) - 1);
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                      seg[solid] = 'f1';
+                    } else if (pct >= 100) {
+                      seg.fill('on');
+                    } else if (pct <= 10) {
+                      seg[0] = 'f4';
+                    } else {
+                      const solid = Math.max(1, Math.ceil(pct / 20));
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                    }
+                  }
+                  const s = seg[IDX];
+                  const lit = s !== 'off';
+                  return lit ? 'rgb(' + rgb + ')' : OFF;
+                ]]]
+            - box-shadow: |
+                [[[
+                  // ---- CONFIG (identical in every segment) ----
+                  // If your power sensor is negative while charging, set
+                  // POWER_POSITIVE_IS_CHARGING = false.
+                  const CHARGE_ENTITY = 'sensor.marstek_m1_ac_power';     // W, positive = charging
+                  const POWER_POSITIVE_IS_CHARGING = true;
+                  const POWER_DEADBAND_W = 20;
+                  const CHARGING_STATES = ['on', 'charging', 'charge'];
+                  const FAULT_ENTITY = '';
+                  const FAULT_STATES = ['on', 'fault', 'error', 'problem'];
+                  const ICE_BLUE = '79,195,247';
+                  const RED = '244,67,54';
+                  const OFF = '#2a2a2a';
+                  const IDX = 2;                      // this segment, 0..4
+                  // ---------------------------------------------
+                  const soc = parseFloat(entity ? entity.state : 'x');
+                  const seg = ['off','off','off','off','off'];
+                  let rgb = ICE_BLUE;
+                  const fst = FAULT_ENTITY && states[FAULT_ENTITY] ? states[FAULT_ENTITY].state : undefined;
+                  if (fst !== undefined && FAULT_STATES.includes(String(fst).toLowerCase())) {
+                    rgb = RED; seg.fill('on');
+                  } else if (!isNaN(soc)) {
+                    let charging = false;
+                    const cst = CHARGE_ENTITY && states[CHARGE_ENTITY] ? states[CHARGE_ENTITY].state : undefined;
+                    if (cst !== undefined) {
+                      const w = parseFloat(cst);
+                      if (!isNaN(w)) charging = POWER_POSITIVE_IS_CHARGING ? w > POWER_DEADBAND_W : w < -POWER_DEADBAND_W;
+                      else charging = CHARGING_STATES.includes(String(cst).toLowerCase());
+                    }
+                    const pct = Math.max(0, Math.min(100, soc));
+                    if (charging && pct < 100) {
+                      const solid = Math.max(0, Math.ceil(pct / 20) - 1);
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                      seg[solid] = 'f1';
+                    } else if (pct >= 100) {
+                      seg.fill('on');
+                    } else if (pct <= 10) {
+                      seg[0] = 'f4';
+                    } else {
+                      const solid = Math.max(1, Math.ceil(pct / 20));
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                    }
+                  }
+                  const s = seg[IDX];
+                  const lit = s !== 'off';
+                  return lit ? '0 0 8px rgba(' + rgb + ',0.85)' : 'none';
+                ]]]
+            - animation: |
+                [[[
+                  // ---- CONFIG (identical in every segment) ----
+                  // If your power sensor is negative while charging, set
+                  // POWER_POSITIVE_IS_CHARGING = false.
+                  const CHARGE_ENTITY = 'sensor.marstek_m1_ac_power';     // W, positive = charging
+                  const POWER_POSITIVE_IS_CHARGING = true;
+                  const POWER_DEADBAND_W = 20;
+                  const CHARGING_STATES = ['on', 'charging', 'charge'];
+                  const FAULT_ENTITY = '';
+                  const FAULT_STATES = ['on', 'fault', 'error', 'problem'];
+                  const ICE_BLUE = '79,195,247';
+                  const RED = '244,67,54';
+                  const OFF = '#2a2a2a';
+                  const IDX = 2;                      // this segment, 0..4
+                  // ---------------------------------------------
+                  const soc = parseFloat(entity ? entity.state : 'x');
+                  const seg = ['off','off','off','off','off'];
+                  let rgb = ICE_BLUE;
+                  const fst = FAULT_ENTITY && states[FAULT_ENTITY] ? states[FAULT_ENTITY].state : undefined;
+                  if (fst !== undefined && FAULT_STATES.includes(String(fst).toLowerCase())) {
+                    rgb = RED; seg.fill('on');
+                  } else if (!isNaN(soc)) {
+                    let charging = false;
+                    const cst = CHARGE_ENTITY && states[CHARGE_ENTITY] ? states[CHARGE_ENTITY].state : undefined;
+                    if (cst !== undefined) {
+                      const w = parseFloat(cst);
+                      if (!isNaN(w)) charging = POWER_POSITIVE_IS_CHARGING ? w > POWER_DEADBAND_W : w < -POWER_DEADBAND_W;
+                      else charging = CHARGING_STATES.includes(String(cst).toLowerCase());
+                    }
+                    const pct = Math.max(0, Math.min(100, soc));
+                    if (charging && pct < 100) {
+                      const solid = Math.max(0, Math.ceil(pct / 20) - 1);
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                      seg[solid] = 'f1';
+                    } else if (pct >= 100) {
+                      seg.fill('on');
+                    } else if (pct <= 10) {
+                      seg[0] = 'f4';
+                    } else {
+                      const solid = Math.max(1, Math.ceil(pct / 20));
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                    }
+                  }
+                  const s = seg[IDX];
+                  const lit = s !== 'off';
+                  if (s === 'f1') return 'soc_flash 1s step-end infinite';
+                  if (s === 'f4') return 'soc_flash 4s step-end infinite';
+                  return 'none';
+                ]]]
+        extra_styles: |
+          @keyframes soc_flash {
+            0%   { opacity: 1; }
+            50%  { opacity: 0; }
+            100% { opacity: 1; }
+          }
+        style:
+          left: calc(50% + 0px)
+          top: 19.8%
+          transform: translate(-50%, -50%)
+          z-index: 6
+      - type: custom:button-card
+        entity: sensor.marstek_m1_battery_state_of_charge
+        triggers_update:
+          - sensor.marstek_m1_ac_power
+        show_name: false
+        show_icon: false
+        show_state: false
+        show_label: false
+        tap_action:
+          action: none
+        hold_action:
+          action: none
+        styles:
+          card:
+            - width: 24px
+            - height: 3px
+            - min-height: 3px
+            - padding: 0
+            - margin: 0
+            - border: none
+            - border-radius: 0
+            - transition: background 0.6s ease
+            - background: |
+                [[[
+                  // ---- CONFIG (identical in every segment) ----
+                  // If your power sensor is negative while charging, set
+                  // POWER_POSITIVE_IS_CHARGING = false.
+                  const CHARGE_ENTITY = 'sensor.marstek_m1_ac_power';     // W, positive = charging
+                  const POWER_POSITIVE_IS_CHARGING = true;
+                  const POWER_DEADBAND_W = 20;
+                  const CHARGING_STATES = ['on', 'charging', 'charge'];
+                  const FAULT_ENTITY = '';
+                  const FAULT_STATES = ['on', 'fault', 'error', 'problem'];
+                  const ICE_BLUE = '79,195,247';
+                  const RED = '244,67,54';
+                  const OFF = '#2a2a2a';
+                  const IDX = 3;                      // this segment, 0..4
+                  // ---------------------------------------------
+                  const soc = parseFloat(entity ? entity.state : 'x');
+                  const seg = ['off','off','off','off','off'];
+                  let rgb = ICE_BLUE;
+                  const fst = FAULT_ENTITY && states[FAULT_ENTITY] ? states[FAULT_ENTITY].state : undefined;
+                  if (fst !== undefined && FAULT_STATES.includes(String(fst).toLowerCase())) {
+                    rgb = RED; seg.fill('on');
+                  } else if (!isNaN(soc)) {
+                    let charging = false;
+                    const cst = CHARGE_ENTITY && states[CHARGE_ENTITY] ? states[CHARGE_ENTITY].state : undefined;
+                    if (cst !== undefined) {
+                      const w = parseFloat(cst);
+                      if (!isNaN(w)) charging = POWER_POSITIVE_IS_CHARGING ? w > POWER_DEADBAND_W : w < -POWER_DEADBAND_W;
+                      else charging = CHARGING_STATES.includes(String(cst).toLowerCase());
+                    }
+                    const pct = Math.max(0, Math.min(100, soc));
+                    if (charging && pct < 100) {
+                      const solid = Math.max(0, Math.ceil(pct / 20) - 1);
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                      seg[solid] = 'f1';
+                    } else if (pct >= 100) {
+                      seg.fill('on');
+                    } else if (pct <= 10) {
+                      seg[0] = 'f4';
+                    } else {
+                      const solid = Math.max(1, Math.ceil(pct / 20));
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                    }
+                  }
+                  const s = seg[IDX];
+                  const lit = s !== 'off';
+                  return lit ? 'rgb(' + rgb + ')' : OFF;
+                ]]]
+            - box-shadow: |
+                [[[
+                  // ---- CONFIG (identical in every segment) ----
+                  // If your power sensor is negative while charging, set
+                  // POWER_POSITIVE_IS_CHARGING = false.
+                  const CHARGE_ENTITY = 'sensor.marstek_m1_ac_power';     // W, positive = charging
+                  const POWER_POSITIVE_IS_CHARGING = true;
+                  const POWER_DEADBAND_W = 20;
+                  const CHARGING_STATES = ['on', 'charging', 'charge'];
+                  const FAULT_ENTITY = '';
+                  const FAULT_STATES = ['on', 'fault', 'error', 'problem'];
+                  const ICE_BLUE = '79,195,247';
+                  const RED = '244,67,54';
+                  const OFF = '#2a2a2a';
+                  const IDX = 3;                      // this segment, 0..4
+                  // ---------------------------------------------
+                  const soc = parseFloat(entity ? entity.state : 'x');
+                  const seg = ['off','off','off','off','off'];
+                  let rgb = ICE_BLUE;
+                  const fst = FAULT_ENTITY && states[FAULT_ENTITY] ? states[FAULT_ENTITY].state : undefined;
+                  if (fst !== undefined && FAULT_STATES.includes(String(fst).toLowerCase())) {
+                    rgb = RED; seg.fill('on');
+                  } else if (!isNaN(soc)) {
+                    let charging = false;
+                    const cst = CHARGE_ENTITY && states[CHARGE_ENTITY] ? states[CHARGE_ENTITY].state : undefined;
+                    if (cst !== undefined) {
+                      const w = parseFloat(cst);
+                      if (!isNaN(w)) charging = POWER_POSITIVE_IS_CHARGING ? w > POWER_DEADBAND_W : w < -POWER_DEADBAND_W;
+                      else charging = CHARGING_STATES.includes(String(cst).toLowerCase());
+                    }
+                    const pct = Math.max(0, Math.min(100, soc));
+                    if (charging && pct < 100) {
+                      const solid = Math.max(0, Math.ceil(pct / 20) - 1);
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                      seg[solid] = 'f1';
+                    } else if (pct >= 100) {
+                      seg.fill('on');
+                    } else if (pct <= 10) {
+                      seg[0] = 'f4';
+                    } else {
+                      const solid = Math.max(1, Math.ceil(pct / 20));
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                    }
+                  }
+                  const s = seg[IDX];
+                  const lit = s !== 'off';
+                  return lit ? '0 0 8px rgba(' + rgb + ',0.85)' : 'none';
+                ]]]
+            - animation: |
+                [[[
+                  // ---- CONFIG (identical in every segment) ----
+                  // If your power sensor is negative while charging, set
+                  // POWER_POSITIVE_IS_CHARGING = false.
+                  const CHARGE_ENTITY = 'sensor.marstek_m1_ac_power';     // W, positive = charging
+                  const POWER_POSITIVE_IS_CHARGING = true;
+                  const POWER_DEADBAND_W = 20;
+                  const CHARGING_STATES = ['on', 'charging', 'charge'];
+                  const FAULT_ENTITY = '';
+                  const FAULT_STATES = ['on', 'fault', 'error', 'problem'];
+                  const ICE_BLUE = '79,195,247';
+                  const RED = '244,67,54';
+                  const OFF = '#2a2a2a';
+                  const IDX = 3;                      // this segment, 0..4
+                  // ---------------------------------------------
+                  const soc = parseFloat(entity ? entity.state : 'x');
+                  const seg = ['off','off','off','off','off'];
+                  let rgb = ICE_BLUE;
+                  const fst = FAULT_ENTITY && states[FAULT_ENTITY] ? states[FAULT_ENTITY].state : undefined;
+                  if (fst !== undefined && FAULT_STATES.includes(String(fst).toLowerCase())) {
+                    rgb = RED; seg.fill('on');
+                  } else if (!isNaN(soc)) {
+                    let charging = false;
+                    const cst = CHARGE_ENTITY && states[CHARGE_ENTITY] ? states[CHARGE_ENTITY].state : undefined;
+                    if (cst !== undefined) {
+                      const w = parseFloat(cst);
+                      if (!isNaN(w)) charging = POWER_POSITIVE_IS_CHARGING ? w > POWER_DEADBAND_W : w < -POWER_DEADBAND_W;
+                      else charging = CHARGING_STATES.includes(String(cst).toLowerCase());
+                    }
+                    const pct = Math.max(0, Math.min(100, soc));
+                    if (charging && pct < 100) {
+                      const solid = Math.max(0, Math.ceil(pct / 20) - 1);
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                      seg[solid] = 'f1';
+                    } else if (pct >= 100) {
+                      seg.fill('on');
+                    } else if (pct <= 10) {
+                      seg[0] = 'f4';
+                    } else {
+                      const solid = Math.max(1, Math.ceil(pct / 20));
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                    }
+                  }
+                  const s = seg[IDX];
+                  const lit = s !== 'off';
+                  if (s === 'f1') return 'soc_flash 1s step-end infinite';
+                  if (s === 'f4') return 'soc_flash 4s step-end infinite';
+                  return 'none';
+                ]]]
+        extra_styles: |
+          @keyframes soc_flash {
+            0%   { opacity: 1; }
+            50%  { opacity: 0; }
+            100% { opacity: 1; }
+          }
+        style:
+          left: calc(50% + 24px)
+          top: 19.8%
+          transform: translate(-50%, -50%)
+          z-index: 6
+      - type: custom:button-card
+        entity: sensor.marstek_m1_battery_state_of_charge
+        triggers_update:
+          - sensor.marstek_m1_ac_power
+        show_name: false
+        show_icon: false
+        show_state: false
+        show_label: false
+        tap_action:
+          action: none
+        hold_action:
+          action: none
+        styles:
+          card:
+            - width: 24px
+            - height: 3px
+            - min-height: 3px
+            - padding: 0
+            - margin: 0
+            - border: none
+            - border-radius: 0 3px 3px 0
+            - transition: background 0.6s ease
+            - background: |
+                [[[
+                  // ---- CONFIG (identical in every segment) ----
+                  // If your power sensor is negative while charging, set
+                  // POWER_POSITIVE_IS_CHARGING = false.
+                  const CHARGE_ENTITY = 'sensor.marstek_m1_ac_power';     // W, positive = charging
+                  const POWER_POSITIVE_IS_CHARGING = true;
+                  const POWER_DEADBAND_W = 20;
+                  const CHARGING_STATES = ['on', 'charging', 'charge'];
+                  const FAULT_ENTITY = '';
+                  const FAULT_STATES = ['on', 'fault', 'error', 'problem'];
+                  const ICE_BLUE = '79,195,247';
+                  const RED = '244,67,54';
+                  const OFF = '#2a2a2a';
+                  const IDX = 4;                      // this segment, 0..4
+                  // ---------------------------------------------
+                  const soc = parseFloat(entity ? entity.state : 'x');
+                  const seg = ['off','off','off','off','off'];
+                  let rgb = ICE_BLUE;
+                  const fst = FAULT_ENTITY && states[FAULT_ENTITY] ? states[FAULT_ENTITY].state : undefined;
+                  if (fst !== undefined && FAULT_STATES.includes(String(fst).toLowerCase())) {
+                    rgb = RED; seg.fill('on');
+                  } else if (!isNaN(soc)) {
+                    let charging = false;
+                    const cst = CHARGE_ENTITY && states[CHARGE_ENTITY] ? states[CHARGE_ENTITY].state : undefined;
+                    if (cst !== undefined) {
+                      const w = parseFloat(cst);
+                      if (!isNaN(w)) charging = POWER_POSITIVE_IS_CHARGING ? w > POWER_DEADBAND_W : w < -POWER_DEADBAND_W;
+                      else charging = CHARGING_STATES.includes(String(cst).toLowerCase());
+                    }
+                    const pct = Math.max(0, Math.min(100, soc));
+                    if (charging && pct < 100) {
+                      const solid = Math.max(0, Math.ceil(pct / 20) - 1);
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                      seg[solid] = 'f1';
+                    } else if (pct >= 100) {
+                      seg.fill('on');
+                    } else if (pct <= 10) {
+                      seg[0] = 'f4';
+                    } else {
+                      const solid = Math.max(1, Math.ceil(pct / 20));
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                    }
+                  }
+                  const s = seg[IDX];
+                  const lit = s !== 'off';
+                  return lit ? 'rgb(' + rgb + ')' : OFF;
+                ]]]
+            - box-shadow: |
+                [[[
+                  // ---- CONFIG (identical in every segment) ----
+                  // If your power sensor is negative while charging, set
+                  // POWER_POSITIVE_IS_CHARGING = false.
+                  const CHARGE_ENTITY = 'sensor.marstek_m1_ac_power';     // W, positive = charging
+                  const POWER_POSITIVE_IS_CHARGING = true;
+                  const POWER_DEADBAND_W = 20;
+                  const CHARGING_STATES = ['on', 'charging', 'charge'];
+                  const FAULT_ENTITY = '';
+                  const FAULT_STATES = ['on', 'fault', 'error', 'problem'];
+                  const ICE_BLUE = '79,195,247';
+                  const RED = '244,67,54';
+                  const OFF = '#2a2a2a';
+                  const IDX = 4;                      // this segment, 0..4
+                  // ---------------------------------------------
+                  const soc = parseFloat(entity ? entity.state : 'x');
+                  const seg = ['off','off','off','off','off'];
+                  let rgb = ICE_BLUE;
+                  const fst = FAULT_ENTITY && states[FAULT_ENTITY] ? states[FAULT_ENTITY].state : undefined;
+                  if (fst !== undefined && FAULT_STATES.includes(String(fst).toLowerCase())) {
+                    rgb = RED; seg.fill('on');
+                  } else if (!isNaN(soc)) {
+                    let charging = false;
+                    const cst = CHARGE_ENTITY && states[CHARGE_ENTITY] ? states[CHARGE_ENTITY].state : undefined;
+                    if (cst !== undefined) {
+                      const w = parseFloat(cst);
+                      if (!isNaN(w)) charging = POWER_POSITIVE_IS_CHARGING ? w > POWER_DEADBAND_W : w < -POWER_DEADBAND_W;
+                      else charging = CHARGING_STATES.includes(String(cst).toLowerCase());
+                    }
+                    const pct = Math.max(0, Math.min(100, soc));
+                    if (charging && pct < 100) {
+                      const solid = Math.max(0, Math.ceil(pct / 20) - 1);
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                      seg[solid] = 'f1';
+                    } else if (pct >= 100) {
+                      seg.fill('on');
+                    } else if (pct <= 10) {
+                      seg[0] = 'f4';
+                    } else {
+                      const solid = Math.max(1, Math.ceil(pct / 20));
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                    }
+                  }
+                  const s = seg[IDX];
+                  const lit = s !== 'off';
+                  return lit ? '0 0 8px rgba(' + rgb + ',0.85)' : 'none';
+                ]]]
+            - animation: |
+                [[[
+                  // ---- CONFIG (identical in every segment) ----
+                  // If your power sensor is negative while charging, set
+                  // POWER_POSITIVE_IS_CHARGING = false.
+                  const CHARGE_ENTITY = 'sensor.marstek_m1_ac_power';     // W, positive = charging
+                  const POWER_POSITIVE_IS_CHARGING = true;
+                  const POWER_DEADBAND_W = 20;
+                  const CHARGING_STATES = ['on', 'charging', 'charge'];
+                  const FAULT_ENTITY = '';
+                  const FAULT_STATES = ['on', 'fault', 'error', 'problem'];
+                  const ICE_BLUE = '79,195,247';
+                  const RED = '244,67,54';
+                  const OFF = '#2a2a2a';
+                  const IDX = 4;                      // this segment, 0..4
+                  // ---------------------------------------------
+                  const soc = parseFloat(entity ? entity.state : 'x');
+                  const seg = ['off','off','off','off','off'];
+                  let rgb = ICE_BLUE;
+                  const fst = FAULT_ENTITY && states[FAULT_ENTITY] ? states[FAULT_ENTITY].state : undefined;
+                  if (fst !== undefined && FAULT_STATES.includes(String(fst).toLowerCase())) {
+                    rgb = RED; seg.fill('on');
+                  } else if (!isNaN(soc)) {
+                    let charging = false;
+                    const cst = CHARGE_ENTITY && states[CHARGE_ENTITY] ? states[CHARGE_ENTITY].state : undefined;
+                    if (cst !== undefined) {
+                      const w = parseFloat(cst);
+                      if (!isNaN(w)) charging = POWER_POSITIVE_IS_CHARGING ? w > POWER_DEADBAND_W : w < -POWER_DEADBAND_W;
+                      else charging = CHARGING_STATES.includes(String(cst).toLowerCase());
+                    }
+                    const pct = Math.max(0, Math.min(100, soc));
+                    if (charging && pct < 100) {
+                      const solid = Math.max(0, Math.ceil(pct / 20) - 1);
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                      seg[solid] = 'f1';
+                    } else if (pct >= 100) {
+                      seg.fill('on');
+                    } else if (pct <= 10) {
+                      seg[0] = 'f4';
+                    } else {
+                      const solid = Math.max(1, Math.ceil(pct / 20));
+                      for (let i = 0; i < solid; i++) seg[i] = 'on';
+                    }
+                  }
+                  const s = seg[IDX];
+                  const lit = s !== 'off';
+                  if (s === 'f1') return 'soc_flash 1s step-end infinite';
+                  if (s === 'f4') return 'soc_flash 4s step-end infinite';
+                  return 'none';
+                ]]]
+        extra_styles: |
+          @keyframes soc_flash {
+            0%   { opacity: 1; }
+            50%  { opacity: 0; }
+            100% { opacity: 1; }
+          }
+        style:
+          left: calc(50% + 48px)
+          top: 19.8%
+          transform: translate(-50%, -50%)
+          z-index: 6
+      - type: custom:mushroom-template-card
+        entity: sensor.marstek_m1_battery_state_of_charge
+        icon: mdi:battery
+        icon_color: '#4FC3F7'
+        primary: >-
+          {{ states('sensor.marstek_m1_battery_state_of_charge') | float(0) |
+          round(0) | int }} %
+        secondary: >-
+          {{ 'Charging' if states('sensor.marstek_m1_ac_power') | float(0) > 20
+          else 'Discharging' }}
+        tap_action:
+          action: more-info
+        card_mod:
+          style: >
+            ha-card {
+              background: rgba(0, 0, 0, 0.4) !important;
+              border-radius: 10px !important;
+              border: 1px solid rgba(255, 255, 255, 0.08) !important;
+              box-shadow: none !important;
+              padding: 0px 4px !important;
+              height: 54px !important;
+              width: 100% !important;
+              box-sizing: border-box !important;
+              display: flex !important;
+              align-items: center !important;
+              justify-content: center !important;
+              --icon-size: 26px !important;
+            }
+
+            mushroom-state-item { margin: 0 !important; padding: 0 !important;
+            display: flex !important; align-items: center !important;
+            justify-content: center !important; gap: 8px !important; width: 100%
+            !important; }
+
+            mushroom-shape-icon { --shape-color: transparent !important;
+            --icon-symbol-size: 22px !important; }
+
+            mushroom-state-info { flex-grow: 0 !important; display: flex
+            !important; flex-direction: column !important; align-items: center
+            !important; justify-content: center !important; text-align: center
+            !important; margin: 0 !important; }
+
+            .primary { font-size: 13px !important; font-weight: 600 !important;
+            color: #ffffff !important; line-height: 1.2 !important; }
+
+            .secondary { font-size: 14px !important; color: #a0a0a0 !important;
+            line-height: 1.2 !important; }
+        style:
+          left: 50%
+          top: calc(0% - 42px)
+          width: 44%
+          min-width: 100px
+          transform: translate(-50%, -50%)
+          z-index: 1
+title: M1
