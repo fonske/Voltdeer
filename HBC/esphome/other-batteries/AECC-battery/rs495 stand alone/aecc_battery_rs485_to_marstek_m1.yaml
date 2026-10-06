@@ -1,0 +1,2343 @@
+substitutions:
+  name: marstek-m1                # hostname; first flash from the old name: see "use_address" note under wifi
+  friendly_name: "Marstek M1"     # HA device name -> entity ids become sensor.marstek_m1_*, number.marstek_m1_*, ...
+
+  ## ---- Fake Marstek M1 interface for HBC (Home Battery Control) ----
+  battery_device_name: "AECC Battery 1"   # shown on the HBC dashboard (must not be 'unknown')
+  battery_capacity_kwh: "5.12"                 # kWh, usable capacity (not readable from the inverter)
+  battery_nominal_voltage: "51.2"              # V, nominal pack voltage (not readable from the inverter)
+
+  ## ---- Power control via the battery's own WiFi module (JSON API, TCP 8080) ----
+  aecc_ip: "192.168.0.132"     # <-- IP address of the battery's WiFi module (give it a DHCP reservation)
+  aecc_port: "8080"
+  ems_slot_min_interval: "10"   # s, minimum time between JSON updates of schedule slot 3003 (the battery's fallback command)
+  ems_min_soc: "15"             # %, default of "Discharge Limit" (no discharging at or below this SOC)
+  ems_max_soc: "100"            # %, default of "Charge Limit" (no charging at or above this SOC)
+  ems_max_charge: "2400"        # W, hardware maximum charge power: upper end of "Max Charge Power" and its default
+  ems_max_discharge: "2400"     # W, hardware maximum discharge power: upper end of "Max Discharge Power" and its default
+
+## Version 2.0 - Exposes the device to Home Assistant as a Marstek M1 battery for HBC.
+##               The ESP now takes the HBC commands directly (RS485 Control Mode, Forcible
+##               Charge/Discharge, Forcible Charge/Discharge Power, User Work Mode) and turns
+##               them into the 0xFE16 setpoint. The "Power Setpoint" number is removed (HBC
+##               drives the battery), "Work Mode" is now internal and follows the HBC selects.
+##               Entities HBC needs (with friendly_name "Marstek M1"):
+##                 sensor.marstek_m1_device_name                 number.marstek_m1_max_charge_power
+##                 sensor.marstek_m1_battery_state_of_charge     number.marstek_m1_max_discharge_power
+##                 sensor.marstek_m1_battery_voltage             number.marstek_m1_forcible_charge_power
+##                 sensor.marstek_m1_battery_total_energy        number.marstek_m1_forcible_discharge_power
+##                 sensor.marstek_m1_ac_power                    number.marstek_m1_charge_to_soc
+##                 sensor.marstek_m1_battery_power               select.marstek_m1_rs485_control_mode
+##                 sensor.marstek_m1_inverter_state              select.marstek_m1_user_work_mode
+##                 sensor.marstek_m1_inverter_state_number       select.marstek_m1_forcible_charge_discharge
+##                 sensor.marstek_m1_battery_remaining_capacity
+## Version 1.0 - AECC battery over RS485 (Modbus) with local power control via the JSON API (port 8080)
+##               Register map: makstech/esphome-aecc; work modes and names: StekkerDeal/aecc-battery-local
+#
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}   # required: HA builds the marstek_m1_ entity ids from this
+  min_version: 2026.9.0   # needed for modbus turnaround_time
+  name_add_mac_suffix: false
+  includes:                # needed for the JSON API client (TCP sockets + background task)
+    - <sys/socket.h>
+    - <netinet/in.h>
+    - <arpa/inet.h>
+    - <fcntl.h>
+    - <unistd.h>
+    - <cerrno>
+    - <atomic>
+    - <string>
+    - <freertos/FreeRTOS.h>
+    - <freertos/task.h>
+  on_boot:
+    priority: -200
+    then:
+      - delay: 20s
+      - if:
+          condition:
+            select.is:
+              id: working_mode
+              options: "Custom / Manual"
+          then:
+            - script.execute: ems_take_control
+      - script.execute: apply_control_mode
+
+esp32:
+  board: esp32-s3-devkitc-1  ## M5stack Atom S3 lite  
+  flash_size: 8MB
+  variant: esp32s3
+  cpu_frequency: 80MHz
+  framework:
+    type: esp-idf
+    version: recommended
+    ## Custom sdkconfig options
+    sdkconfig_options:
+      CONFIG_COMPILER_OPTIMIZATION_SIZE: y   # needs the CONFIG_ prefix, otherwise ignored
+      CONFIG_BT_ENABLED: n
+
+## Enable/Disable logging
+logger:
+  logs:
+    component: ERROR
+    modbus.number: WARN    # the setpoint writer logs every 1 s write at DEBUG
+  
+## Enable Home Assistant API
+api:
+  reboot_timeout: 0s
+#  encryption:
+#    key: !secret aecc_battery_api_encryption_key
+
+## Enable OTA updates
+ota:
+  - platform: esphome
+  - platform: web_server
+#  password: !secret aecc_battery_ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  reboot_timeout: 0s
+  fast_connect: true
+  power_save_mode: none   # "high" adds latency and dropouts; the ESP is mains-powered anyway
+  ## OTA address (= the default). For the FIRST OTA upload after a rename, temporarily put the
+  ## OLD hostname here (e.g. aecc-battery.local), flash, then set it back to ${name}.local.
+  use_address: ${name}.local
+
+## uncomment if you need a fixed ip address
+#  manual_ip:
+#    static_ip: 192.168.178.126
+#    gateway: 192.168.178.1
+#    subnet: 255.255.255.0
+
+## Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "${friendly_name} Hotspot"
+    password: "configesp"
+    ap_timeout: 15s
+
+captive_portal:
+  id: id_captive_portal
+  
+web_server:
+  port: 80
+  version: 3
+  include_internal: False
+#  ota: False
+  local: True
+  sorting_groups:
+    - id: Info
+      name: "Info"
+      sorting_weight: -40
+    - id: Control
+      name: "Control (HBC)"
+      sorting_weight: -30
+    - id: Status
+      name: "Status"
+      sorting_weight: -20
+    - id: Settings
+      name: "Settings"
+      sorting_weight: -15
+    - id: Advanced
+      name: "Advanced (careful!)"
+      sorting_weight: -12
+    - id: Diagnostic
+      name: "Diagnostic"
+      sorting_weight: -10
+
+## Configure i2c (grove port on Atom S3)
+i2c:
+  - id: bus_a
+    sda: GPIO2
+    scl: GPIO1
+
+## Configure UART
+uart:
+  - id: mod_bus
+    tx_pin: GPIO6
+    rx_pin: GPIO5
+    baud_rate: 9600
+    data_bits: 8
+    stop_bits: 1
+    parity: NONE
+
+modbus:
+  - uart_id: mod_bus
+    id: modbus1
+    send_wait_time: 350ms   # how long to wait for a reply; same reply window as makstech/esphome-aecc
+                            # (was 20 ms: too short, the inverter often answers later -> lost frames/writes)
+    turnaround_time: 15ms   # AECC needs >= 12 ms between frames; default (600 ms) is needlessly slow
+
+modbus_controller:
+  - id: mt
+    address: 0x1
+    modbus_id: modbus1
+    update_interval: 5s     # live telemetry
+
+  ## Same inverter, polled less often (replaces skip_updates, which ESPHome 2026.x ignores)
+  - id: mt_30s
+    address: 0x1
+    modbus_id: modbus1
+    update_interval: 30s     # temperatures
+
+  - id: mt_slow
+    address: 0x1
+    modbus_id: modbus1
+    update_interval: 600s    # settings (numbers / selects / switches); ~25 reads in one burst, so keep it rare
+
+# Uart logging on/off switch
+switch:
+  - platform: template
+    name: UART Logging
+    id: uart_debug_switch
+    icon: mdi:text
+    restore_mode: ALWAYS_OFF
+    optimistic: true
+    turn_on_action:
+      - logger.set_level: VERBOSE
+    turn_off_action:
+      - logger.set_level: ERROR
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 20
+      
+###############################################################################
+## POWER CONTROL
+## HBC -> battery (all on this ESP):
+##   RS485 Control Mode 'enable'  -> Work Mode Custom / Manual, setpoint from the Forcible selects:
+##       charge    -> + Forcible Charge Power      (clamped to Max Charge Power)
+##       discharge -> - Forcible Discharge Power   (clamped to Max Discharge Power)
+##       stop      -> 0 W
+##   RS485 Control Mode 'disable' -> setpoint 0 W, and User Work Mode decides:
+##       anti-feed / ai -> Work Mode Self-Consumption (AI) (the battery's own AI)
+##       manual         -> left as it is (in Custom / Manual it idles at 0 W).
+##       HBC re-writes 'manual' every 5 min in master mode "Manual control"; that is harmless here.
+## How the inverter is driven (from makstech/esphome-aecc docs/PROTOCOL.md):
+##  1. The energy manager (JSON API on ${aecc_ip}:${aecc_port}, NOT on Modbus) must be enabled,
+##     in custom mode, with schedule slot 3003 running a command. The slot holds the target itself.
+##  2. 0xFE16 (Modbus) is written every second for a fast response; when a write is missed
+##     the battery falls back to the slot, which equals the target, so nothing changes.
+##  3. The vendor app's AI mode rewrites the energy manager settings, so they are reasserted
+##     every 5 minutes while Work Mode is "Custom / Manual".
+## Work Mode (internal), same modes and registers as StekkerDeal/aecc-battery-local:
+##   Self-Consumption (AI): 3000=1, 3020=3, 3021=1, 3022=1, 3030=0, slot 3003 cleared -> battery's own AI
+##   Custom / Manual:       3000=1, 3020=6, 3021=0, 3022=0, 3030=1, slot 3003 = target power,
+##                          3039 = max(Max Charge Power, Max Discharge Power) (local TCP control is capped
+##                          at 800 W unless 3039 is raised)
+##   Both:                  3023 = Discharge Limit, 3024 = Charge Limit (the slot carries them as well)
+## The JSON API serves ONE client at a time: close the vendor app / disable any HA integration
+## that talks to the battery on port 8080 (e.g. "AECC Battery (Local TCP)"), otherwise requests here get no reply.
+###############################################################################
+## AECC on/off settings (0 = off, 1 = on)
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Energy Saving Mode"
+    id: eco_mode
+    icon: mdi:leaf
+    register_type: holding
+    address: 0xA02D        # ecoEn
+    bitmask: 1
+    entity_category: config
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 31
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Buzzer Mute"
+    id: buzzer_mute
+    icon: mdi:volume-off
+    register_type: holding
+    address: 0xA033        # muteEn
+    bitmask: 1
+    entity_category: config
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 32
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Battery Activation"
+    id: battery_activation
+    icon: mdi:battery-sync
+    register_type: holding
+    address: 0xA03E        # battActiveSet
+    bitmask: 1
+    entity_category: config
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 33
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Mixing Priority"
+    id: mixing_priority
+    icon: mdi:call-merge
+    register_type: holding
+    address: 0xA041        # hybirdPriorityEn
+    bitmask: 1
+    entity_category: config
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 34
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "External CT From EMS Host"
+    id: external_ct_host
+    icon: mdi:meter-electric
+    register_type: holding
+    address: 0xA047        # extCtGetHostEn
+    bitmask: 1
+    entity_category: config
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 35
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Independent Pack"
+    id: independent_pack
+    icon: mdi:battery-plus-variant
+    register_type: holding
+    address: 0xA0AF        # battPackNotUnion
+    bitmask: 1
+    entity_category: config
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 36
+
+  ## SAFETY: off stops the unit disconnecting from a dead grid
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Anti Islanding"
+    id: anti_islanding
+    icon: mdi:shield-alert
+    register_type: holding
+    address: 0xA069        # islandEn
+    bitmask: 1
+    entity_category: config
+    disabled_by_default: true
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 37
+
+  ## off drops the RS485 BMS link to the pack
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "BMS Function"
+    id: bms_function
+    icon: mdi:battery-heart-variant
+    register_type: holding
+    address: 0xA099        # bmsSet
+    bitmask: 1
+    entity_category: config
+    disabled_by_default: true
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 38
+
+  ## switches the whole inverter off
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Device Power"
+    id: device_power
+    icon: mdi:power
+    register_type: holding
+    address: 0x9C40        # onOffCtrl
+    bitmask: 1
+    entity_category: config
+    disabled_by_default: true
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 39
+
+button:
+  - platform: template
+    name: "Read EMS Config"
+    id: ems_read_config
+    icon: mdi:download-network
+    entity_category: diagnostic
+    on_press:
+      - script.execute:
+          id: ems_send
+          body: '"Get":"Energycontrolparameters","RegControlAddr":[3000,3003,3020,3021,3022,3026,3029,3030,3039]'
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 1
+
+text_sensor:
+  ## MARSTEK: Device Name. HBC shows the battery on its dashboard as long as this is not 'unknown'.
+  - platform: template
+    name: "Device Name"
+    id: marstek_device_name
+    icon: mdi:rename-box
+    update_interval: 60s
+    lambda: 'return {"${battery_device_name}"};'
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 0
+
+  ## MARSTEK: Inverter State, text version of the Inverter State Number (Marstek naming)
+  - platform: template
+    name: "Inverter State"
+    id: marstek_inverter_state
+    icon: mdi:state-machine
+    update_interval: 5s
+    lambda: |-
+      float n = id(marstek_inverter_state_number).state;
+      if (std::isnan(n)) return {"unknown"};
+      switch ((int) n) {
+        case 0: return {"Sleep"};
+        case 1: return {"Standby"};
+        case 2: return {"Charge"};
+        case 3: return {"Discharge"};
+        case 4: return {"Fault"};
+        case 5: return {"Idle"};
+        case 6: return {"AC bypass"};
+        default: return {"Invalid state"};
+      }
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 2
+
+  ## IP address of the AECC battery's WiFi module (JSON API), from the aecc_ip substitution
+  - platform: template
+    name: "AECC IP Address"
+    id: aecc_ip_address
+    icon: mdi:ip-network
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: 'return {"${aecc_ip}"};'
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 7
+
+  ## IP address of this Atom S3 Lite (ESP)
+  - platform: wifi_info
+    ip_address:
+      name: "ESP IP Address"
+      id: esp_ip_address
+      icon: mdi:ip-network-outline
+      entity_category: diagnostic
+      web_server:
+        sorting_group_id: Diagnostic
+        sorting_weight: 8
+    ssid:
+      name: "ESP SSID"
+      id: esp_ssid
+      icon: mdi:wifi-settings
+      entity_category: diagnostic
+      web_server:
+        sorting_group_id: Diagnostic
+        sorting_weight: 9
+
+  - platform: template
+    name: "EMS Reply"
+    id: ems_reply_text
+    icon: mdi:code-json
+    entity_category: diagnostic
+    update_interval: never   # last reply from the battery's JSON API (truncated to 250 chars)
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 2
+
+binary_sensor:
+  - platform: modbus_controller
+    modbus_controller_id: mt
+    name: "Fault"
+    id: fault
+    icon: mdi:heart-pulse
+    device_class: problem
+    register_type: holding
+    address: 0xFE0F        # 65039, device status: 0 normal, 1 fault (StekkerDeal)
+    bitmask: 0xFFFF        # any non-zero value = fault
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 0
+
+sensor:
+  - name: "Atom temperature"
+    id: atom_temperature
+    icon: mdi:thermometer
+    platform: internal_temperature
+    update_interval: 30s
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 14
+
+
+  - platform: wifi_signal
+    name: "ESP WiFi Signal Strength"
+    id: esp_wifi_signal_strength
+    icon: mdi:wifi
+    update_interval: 60s
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 5
+
+  - platform: copy
+    name: "ESP WiFi Signal Percentage"
+    id: esp_wifi_signal_proc
+    source_id: esp_wifi_signal_strength
+    icon: mdi:wifi
+    filters:
+      - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
+    unit_of_measurement: "%"
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 4
+
+## Live telemetry, 65030-65046 (0xFE06-0xFE16). Read in one block by modbus_controller.
+
+  ## MARSTEK: Battery State Of Charge
+  - name: "Battery State Of Charge"
+    id: battery_state_of_charge
+    icon: mdi:power-plug-battery-outline
+    platform: modbus_controller
+    modbus_controller_id: mt
+    register_type: holding
+    address: 0xFE06        # 65030
+    value_type: U_WORD
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    accuracy_decimals: 0   # whole percent
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 3
+
+  ## MARSTEK: Battery Power, + = charging the battery, - = discharging (same as Marstek)
+  - name: "Battery Power"
+    id: battery_power
+    icon: mdi:flash
+    platform: modbus_controller
+    modbus_controller_id: mt
+    register_type: holding
+    address: 0xFE07        # 65031, register: + = discharging; shown as + = charging (StekkerDeal)
+    value_type: S_WORD
+    filters:
+      - multiply: -1
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 7
+
+  ## MARSTEK: AC Power, + = delivering to the house (discharge), - = charging (Marstek convention)
+  - name: "AC Power"
+    id: marstek_ac_power
+    platform: copy
+    source_id: battery_power
+    icon: mdi:home-lightning-bolt-outline
+    filters:
+      - multiply: -1
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 8
+
+  ## MARSTEK: Battery Voltage. The inverter does not expose it: the nominal voltage is reported.
+  - platform: template
+    name: "Battery Voltage"
+    id: marstek_battery_voltage
+    icon: mdi:flash
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: 60s
+    lambda: 'return ${battery_nominal_voltage};'
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 4
+
+  ## MARSTEK: Battery Total Energy (kWh), from the battery_capacity_kwh substitution
+  - platform: template
+    name: "Battery Total Energy"
+    id: marstek_battery_total_energy
+    icon: mdi:battery-high
+    unit_of_measurement: "kWh"
+    device_class: energy_storage
+    state_class: measurement
+    accuracy_decimals: 2
+    update_interval: 60s
+    lambda: 'return ${battery_capacity_kwh};'
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 5
+
+  ## MARSTEK: Battery Remaining Capacity (kWh) = SOC x capacity
+  - platform: template
+    name: "Battery Remaining Capacity"
+    id: marstek_battery_remaining_capacity
+    icon: mdi:battery-arrow-down-outline
+    unit_of_measurement: "kWh"
+    device_class: energy_storage
+    state_class: measurement
+    accuracy_decimals: 2
+    update_interval: 10s
+    lambda: |-
+      float soc = id(battery_state_of_charge).state;
+      if (std::isnan(soc)) return NAN;
+      return soc * ${battery_capacity_kwh} / 100.0f;
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 6
+
+  ## MARSTEK: Inverter State Number: 1=Standby, 2=Charge, 3=Discharge, 4=Fault.
+  ## Derived from Battery Power with a small dead band (-5 .. 10 W) treated as Standby.
+  - platform: template
+    name: "Inverter State Number"
+    id: marstek_inverter_state_number
+    icon: mdi:state-machine
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: 5s
+    lambda: |-
+      if (id(fault).state) return 4;
+      float p = id(battery_power).state;
+      if (std::isnan(p)) return 4;
+      if (p > 10) return 2;
+      if (p < -5) return 3;
+      return 1;
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 1
+
+  - name: "Battery Charging Power"
+    id: battery_charge_power
+    platform: copy
+    source_id: battery_power
+    icon: mdi:battery-arrow-up
+    filters:
+      - lambda: "return x > 0 ? x : 0;"
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 9
+
+  - name: "Battery Discharging Power"
+    id: battery_discharge_power
+    platform: copy
+    source_id: battery_power
+    icon: mdi:battery-arrow-down
+    filters:
+      - lambda: "return x < 0 ? -x : 0;"
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 10
+
+  - name: "AC Charging Power"
+    id: losses_power
+    icon: mdi:transmission-tower-import
+    platform: modbus_controller
+    modbus_controller_id: mt
+    register_type: holding
+    address: 0xFE08        # 65032, standby + conversion loss / power drawn from AC to charge
+    value_type: U_WORD
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 11
+
+  - name: "Grid Power"
+    id: grid_power
+    icon: mdi:transmission-tower
+    platform: modbus_controller
+    modbus_controller_id: mt
+    register_type: holding
+    address: 0xFE0A        # 65034, at the inverter's own port, + = exporting
+    value_type: S_WORD
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 12
+
+  - name: "Backup Power"
+    id: backup_load
+    icon: mdi:power-socket-eu
+    platform: modbus_controller
+    modbus_controller_id: mt
+    register_type: holding
+    address: 0xFE10        # 65040
+    value_type: U_WORD
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 13
+
+  - name: "Active Power Setpoint"
+    id: power_setpoint
+    icon: mdi:target
+    platform: modbus_controller
+    modbus_controller_id: mt
+    register_type: holding
+    address: 0xFE16        # 65046, register: + = discharging; shown as + = charging
+    value_type: S_WORD
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - multiply: -1
+    ## Watchdog (Custom / Manual only): if 0xFE16 reads something other than the target
+    ## (non-zero) for 2 readings in a row (~10 s), re-send the energy manager setup (max once per minute).
+    on_value:
+      - lambda: |-
+          if (id(working_mode).active_index().value_or(0) != 1) { id(setpoint_fallbacks) = 0; return; }   // not Custom / Manual
+          if (std::isnan(x)) return;
+          float reg = -x;                        // back to register convention (+ = discharge)
+          float target = id(desired_power);      // register convention
+          // ignore the first seconds after a target change (write + read may cross)
+          if (millis() - id(desired_since_ms) < 6000) { id(setpoint_fallbacks) = 0; return; }
+          bool fallback = lroundf(reg) != id(desired_power) && id(desired_power) != 0;
+          if (!fallback) { id(setpoint_fallbacks) = 0; return; }
+          id(setpoint_fallbacks) += 1;
+          id(setpoint_fallback_total).publish_state(
+              (std::isnan(id(setpoint_fallback_total).state) ? 0 : id(setpoint_fallback_total).state) + 1);
+          ESP_LOGW("ems", "setpoint reads %.0f W instead of %.0f W (+ = charge), %d in a row",
+                   x, -target, id(setpoint_fallbacks));
+          if (id(setpoint_fallbacks) >= 2 && millis() - id(last_takeover_ms) > 60000) {
+            id(last_takeover_ms) = millis();
+            id(setpoint_fallbacks) = 0;
+            ESP_LOGW("ems", "re-sending energy manager setup");
+            id(slot_power_sent) = 99999;
+            id(ems_take_control).execute();
+          }
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 14
+
+  - name: "Available Charge Power"
+    id: available_charge_power
+    icon: mdi:battery-arrow-up-outline
+    platform: modbus_controller
+    modbus_controller_id: mt
+    register_type: holding
+    address: 0xFE09        # 65033
+    value_type: S_WORD
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 16
+
+  - name: "Nominal Power"
+    id: nominal_power
+    icon: mdi:gauge
+    platform: modbus_controller
+    modbus_controller_id: mt_slow
+    register_type: holding
+    address: 0xFE0B        # 65035
+    value_type: S_WORD
+    unit_of_measurement: "W"
+    device_class: power
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 30
+
+  - name: "Nominal Battery Power"
+    id: nominal_battery_power
+    icon: mdi:gauge
+    platform: modbus_controller
+    modbus_controller_id: mt_slow
+    register_type: holding
+    address: 0xFE0D        # 65037
+    value_type: S_WORD
+    unit_of_measurement: "W"
+    device_class: power
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 31
+
+  - name: "Alarm Flags"
+    id: alarm_flags
+    icon: mdi:alert-circle-outline
+    platform: modbus_controller
+    modbus_controller_id: mt_30s
+    register_type: holding
+    address: 0xFE1B        # 65051-65052, 32-bit, low word first; bit meanings unknown
+    value_type: U_DWORD_R
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 32
+
+## Lifetime energy counters, 52050-52053 and 52080-52081: 32-bit, low word first, 0.1 kWh
+## (StekkerDeal/aecc-battery-local). Counted at the battery, behind the inverter. Read every 10 min.
+## Not confirmed on RS485: if the log shows Modbus errors for these addresses, remove them.
+  - name: "Lifetime Energy Charged"
+    id: lifetime_energy_charged
+    icon: mdi:battery-charging
+    platform: modbus_controller
+    modbus_controller_id: mt_slow
+    register_type: holding
+    address: 52050
+    value_type: U_DWORD_R
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    on_value:
+      - component.update: lifetime_rte
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 20
+
+  - name: "Lifetime Energy Discharged"
+    id: lifetime_energy_discharged
+    icon: mdi:battery-arrow-down-outline
+    platform: modbus_controller
+    modbus_controller_id: mt_slow
+    register_type: holding
+    address: 52052
+    value_type: U_DWORD_R
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    on_value:
+      - component.update: lifetime_rte
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 21
+
+  ## Round-trip efficiency = Lifetime Energy Discharged / Lifetime Energy Charged x 100.
+  ## NaN (unknown) while either counter is unknown or nothing has been charged yet.
+  ## Recalculated whenever one of the two counters gets a new value.
+  - platform: template
+    name: "Lifetime RTE"
+    id: lifetime_rte
+    icon: mdi:battery-sync
+    unit_of_measurement: "%"
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: never
+    lambda: |-
+      float charged = id(lifetime_energy_charged).state;
+      float discharged = id(lifetime_energy_discharged).state;
+      if (std::isnan(charged) || std::isnan(discharged) || charged <= 0.0f) return NAN;
+      return discharged / charged * 100.0f;
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 23
+
+  - name: "Lifetime Energy to Grid"
+    id: lifetime_energy_to_grid
+    icon: mdi:transmission-tower-export
+    platform: modbus_controller
+    modbus_controller_id: mt_slow
+    register_type: holding
+    address: 52080
+    value_type: U_DWORD_R
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 22
+
+  - name: "PV Power"
+    id: pv_power
+    icon: mdi:solar-power
+    platform: modbus_controller
+    modbus_controller_id: mt
+    register_type: holding
+    address: 0xFE1F        # 65055, AC-coupled PV port; raw value is negative while producing
+    value_type: S_WORD
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - multiply: -1       # shown positive while producing
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 15
+
+
+  - platform: template
+    name: "EMS Errors"
+    id: ems_errors
+    icon: mdi:alert-circle-outline
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    state_class: total_increasing
+    update_interval: never     # JSON requests that failed after 3 attempts (since boot)
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 3
+
+  - platform: template
+    name: "Setpoint Fallbacks"
+    id: setpoint_fallback_total
+    icon: mdi:backup-restore
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    state_class: total_increasing
+    update_interval: never     # readings where 0xFE16 did not hold the target
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 6
+
+## Temperatures, 30073-30075 (0x7579-0x757B), signed, 0.1 °C. Labels as in the vendor app /
+## StekkerDeal: the app numbers the first two the other way round from the registers.
+## Source: Lunergy Modbus TCP handleiding. Read as one 3-register block every 30 s (mt_30s).
+  - name: "PV Radiator Temperature"
+    id: temperature_1
+    icon: mdi:thermometer
+    platform: modbus_controller
+    modbus_controller_id: mt_30s
+    register_type: holding
+    address: 30073         # 0x7579
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 1
+
+  - name: "Inverter Temperature"
+    id: temperature_2
+    icon: mdi:thermometer
+    platform: modbus_controller
+    modbus_controller_id: mt_30s
+    register_type: holding
+    address: 30074         # 0x757A
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 2
+
+  - name: "Transformer Temperature"
+    id: temperature_3
+    icon: mdi:thermometer
+    platform: modbus_controller
+    modbus_controller_id: mt_slow
+    register_type: holding
+    address: 30075         # 0x757B
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    web_server:
+      sorting_group_id: Status
+      sorting_weight: 3
+
+
+###############################################################################
+## MARSTEK / HBC CONTROL NUMBERS + AECC SETTINGS
+###############################################################################
+number:
+## MARSTEK: Forcible Charge Power (W). Used while RS485 Control Mode = enable and Forcible = charge.
+  - platform: template
+    name: "Forcible Charge Power"
+    id: forcible_charge_power
+    icon: mdi:tune-variant
+    unit_of_measurement: "W"
+    mode: box
+    min_value: 0
+    max_value: ${ems_max_charge}
+    step: 1
+    initial_value: 0
+    optimistic: true
+    restore_value: false     # always start at 0 W after a reboot; HBC writes it again
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 3
+
+## MARSTEK: Forcible Discharge Power (W). Used while RS485 Control Mode = enable and Forcible = discharge.
+  - platform: template
+    name: "Forcible Discharge Power"
+    id: forcible_discharge_power
+    icon: mdi:tune-variant
+    unit_of_measurement: "W"
+    mode: box
+    min_value: 0
+    max_value: ${ems_max_discharge}
+    step: 1
+    initial_value: 0
+    optimistic: true
+    restore_value: false
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 4
+
+## MARSTEK: Charge To SOC. Only stored (HBC strategies do not use it); the battery uses Charge Limit.
+  - platform: template
+    name: "Charge To SOC"
+    id: charge_to_soc
+    icon: mdi:battery-arrow-up
+    unit_of_measurement: "%"
+    mode: box
+    min_value: 11
+    max_value: 100
+    step: 1
+    initial_value: 100
+    optimistic: true
+    restore_value: true
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 7
+
+## Internal writer for 0xFE16: the 1 s control loop sets this number, and the number writes
+## the register (ESPHome's own write path). Polled only with the settings (every 10 min).
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Setpoint Writer"
+    id: setpoint_writer
+    internal: true
+    register_type: holding
+    address: 0xFE16        # register convention: + = discharge, - = charge
+    value_type: S_WORD
+    min_value: -10000
+    max_value: 10000
+    step: 1
+
+## MARSTEK: Max Charge Power / Max Discharge Power. The setpoint is clamped to these, and the
+## battery's own local power cap (3039) is set to the larger of the two. Kept across reboots.
+  - platform: template
+    name: "Max Charge Power"
+    id: max_charge_power
+    icon: mdi:battery-arrow-up
+    unit_of_measurement: "W"
+    device_class: power
+    mode: box
+    min_value: 0
+    max_value: ${ems_max_charge}
+    step: 50
+    initial_value: ${ems_max_charge}
+    optimistic: true
+    restore_value: true
+    on_value:
+      - lambda: 'id(slot_power_sent) = 99999;'   # re-send the energy manager setup (new 3039) in Custom / Manual
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 5
+
+  - platform: template
+    name: "Max Discharge Power"
+    id: max_discharge_power
+    icon: mdi:battery-arrow-down
+    unit_of_measurement: "W"
+    device_class: power
+    mode: box
+    min_value: 0
+    max_value: ${ems_max_discharge}
+    step: 50
+    initial_value: ${ems_max_discharge}
+    optimistic: true
+    restore_value: true
+    on_value:
+      - lambda: 'id(slot_power_sent) = 99999;'
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 6
+
+## Adjustable SOC limits (as StekkerDeal's Charge Limit / Discharge Limit). Written to the battery
+## as 3023/3024 and inside slot 3003 (the battery enforces the ones in the slot), and used by the
+## ESP to stop charging/discharging. Kept across reboots.
+  - platform: template
+    name: "Charge Limit"
+    id: charge_limit
+    icon: mdi:battery-arrow-up
+    unit_of_measurement: "%"
+    device_class: battery
+    mode: slider
+    min_value: 50
+    max_value: 100
+    step: 5
+    initial_value: ${ems_max_soc}
+    optimistic: true
+    restore_value: true
+    on_value:
+      - script.execute: soc_limits_changed
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: -2
+
+  - platform: template
+    name: "Discharge Limit"
+    id: discharge_limit
+    icon: mdi:battery-arrow-down
+    unit_of_measurement: "%"
+    device_class: battery
+    mode: slider
+    min_value: 5
+    max_value: 50
+    step: 5
+    initial_value: ${ems_min_soc}
+    optimistic: true
+    restore_value: true
+    on_value:
+      - script.execute: soc_limits_changed
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: -1
+
+## Grid-tie (on-grid output) power cap. Lives in THREE places: 0xA03F, mirror 0x9ACE and EMS 3039
+## (JSON API only). Output tops out at the lowest of them. This writes both Modbus copies.
+## Note: it caps total on-grid output (incl. your own load), so it is not a pure export limit.
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Grid Tie Power Cap"
+    id: grid_export_limit
+    icon: mdi:transmission-tower-export
+    register_type: holding
+    address: 0xA03F        # onGridActivePowerSet
+    value_type: U_WORD
+    unit_of_measurement: "W"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 2500        # adjust to your unit's rating
+    step: 1
+    write_lambda: |-
+      // write both copies through this entity's own write helper (FC6)
+      item->write_single_register(0xA03F, (uint16_t) x);
+      item->write_single_register(0x9ACE, (uint16_t) x);   // mirror copy
+      return {};   // already sent above
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 0
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Constant Voltage"
+    id: cv_voltage
+    icon: mdi:flash
+    register_type: holding
+    address: 0xA08D        # cvVolt
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    entity_category: config
+    mode: box
+    min_value: 40
+    max_value: 60
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 1
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Float Voltage"
+    id: float_voltage
+    icon: mdi:flash
+    register_type: holding
+    address: 0xA08E        # floatVolt
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    entity_category: config
+    mode: box
+    min_value: 40
+    max_value: 60
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 2
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "CV Charge Time"
+    id: cv_charge_time
+    icon: mdi:timer-outline
+    register_type: holding
+    address: 0xA090        # cvChgTimeSet
+    value_type: U_WORD
+    unit_of_measurement: "min"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 900
+    step: 1
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 3
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "CV Return Voltage"
+    id: cv_return_voltage
+    icon: mdi:flash
+    register_type: holding
+    address: 0xA091        # cvChgBackVolt
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    entity_category: config
+    mode: box
+    min_value: 40
+    max_value: 60
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 4
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Battery To Mains Voltage"
+    id: battery_to_mains_voltage
+    icon: mdi:flash
+    register_type: holding
+    address: 0xA092        # inv2LineVolt
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    entity_category: config
+    mode: box
+    min_value: 40
+    max_value: 60
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 5
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Mains To Battery Voltage"
+    id: mains_to_battery_voltage
+    icon: mdi:flash
+    register_type: holding
+    address: 0xA093        # lineBack2InvVolt
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    entity_category: config
+    mode: box
+    min_value: 40
+    max_value: 60
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 6
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Undervoltage Alarm"
+    id: undervoltage_alarm
+    icon: mdi:battery-alert
+    register_type: holding
+    address: 0xA094        # battLowVolt
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    entity_category: config
+    mode: box
+    min_value: 40
+    max_value: 60
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 7
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Low Voltage Shutdown"
+    id: low_voltage_shutdown
+    icon: mdi:battery-off
+    register_type: holding
+    address: 0xA095        # battDelayOffVolt
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    entity_category: config
+    mode: box
+    min_value: 40
+    max_value: 60
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 8
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "End Of Discharge Voltage"
+    id: eod_voltage
+    icon: mdi:battery-off-outline
+    register_type: holding
+    address: 0xA096        # battEodVolt
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    entity_category: config
+    mode: box
+    min_value: 40
+    max_value: 60
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 9
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Voltage Shutdown Delay"
+    id: shutdown_delay
+    icon: mdi:timer-outline
+    register_type: holding
+    address: 0xA097        # battDelayOffTime
+    value_type: U_WORD
+    unit_of_measurement: "s"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 600
+    step: 1
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 10
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "End Of Discharge Clear Voltage"
+    id: eod_clear_voltage
+    icon: mdi:flash
+    register_type: holding
+    address: 0xA098        # battEodBackVolt
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    entity_category: config
+    mode: box
+    min_value: 40
+    max_value: 60
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 11
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Max Charge Current"
+    id: max_charge_current
+    icon: mdi:current-dc
+    register_type: holding
+    address: 0xA02F        # maxChgCurrSet
+    value_type: U_WORD
+    unit_of_measurement: "A"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 100
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 12
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "PV Max Charge Current"
+    id: pv_max_charge_current
+    icon: mdi:current-dc
+    register_type: holding
+    address: 0xA030        # chgCurrByPvSet
+    value_type: U_WORD
+    unit_of_measurement: "A"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 100
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 13
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Mains Max Charge Current"
+    id: mains_max_charge_current
+    icon: mdi:current-dc
+    register_type: holding
+    address: 0xA031        # chgCurrByLineSet (UNCONFIRMED: reads 35.0 A where the app shows 50 A)
+    value_type: U_WORD
+    unit_of_measurement: "A"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 100
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 14
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Saturation Current"
+    id: saturation_current
+    icon: mdi:current-dc
+    register_type: holding
+    address: 0xA035        # chgFullCurrSet
+    value_type: U_WORD
+    unit_of_measurement: "A"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 100
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 15
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "SOC Low Alarm"
+    id: soc_low_alarm
+    icon: mdi:battery-alert-variant-outline
+    register_type: holding
+    address: 0xA09B        # -
+    value_type: U_WORD
+    unit_of_measurement: "%"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 100
+    step: 1
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 16
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "SOC Shutdown"
+    id: soc_shutdown
+    icon: mdi:battery-10
+    register_type: holding
+    address: 0xA09C        # -
+    value_type: U_WORD
+    unit_of_measurement: "%"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 100
+    step: 1
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 17
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "SOC Full"
+    id: soc_full
+    icon: mdi:battery
+    register_type: holding
+    address: 0xA09D        # -
+    value_type: U_WORD
+    unit_of_measurement: "%"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 100
+    step: 1
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 18
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "SOC Inverter To Mains"
+    id: soc_inverter_to_mains
+    icon: mdi:battery-arrow-down-outline
+    register_type: holding
+    address: 0xA09E        # -
+    value_type: U_WORD
+    unit_of_measurement: "%"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 100
+    step: 1
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 19
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "SOC Mains To Inverter"
+    id: soc_mains_to_inverter
+    icon: mdi:battery-arrow-up-outline
+    register_type: holding
+    address: 0xA09F        # -
+    value_type: U_WORD
+    unit_of_measurement: "%"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 100
+    step: 1
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 20
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Output Voltage"
+    id: output_voltage
+    icon: mdi:sine-wave
+    register_type: holding
+    address: 0xA029        # outVoltSet
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    entity_category: config
+    mode: box
+    min_value: 200
+    max_value: 250
+    step: 0.1
+    multiply: 10
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 21
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Output Frequency"
+    id: output_frequency
+    icon: mdi:sine-wave
+    register_type: holding
+    address: 0xA02A        # outFreqSet
+    value_type: U_WORD
+    unit_of_measurement: "Hz"
+    entity_category: config
+    mode: box
+    min_value: 45
+    max_value: 65
+    step: 0.01
+    multiply: 100
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 22
+
+select:
+  ## MARSTEK: RS485 Control Mode. 'enable' = HBC has full control (Custom / Manual, setpoint from
+  ## the Forcible selects/numbers). 'disable' = 0 W, battery follows User Work Mode.
+  - platform: template
+    name: "RS485 Control Mode"
+    id: rs485_control_mode
+    icon: mdi:connection
+    options:
+      - "disable"
+      - "enable"
+    initial_option: "disable"
+    optimistic: true
+    restore_value: true
+    on_value:
+      - script.execute: apply_control_mode
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 0
+
+  ## MARSTEK: Forcible Charge/Discharge
+  - platform: template
+    name: "Forcible Charge Discharge"   # entity: select.marstek_m1_forcible_charge_discharge ("/" is reserved in ESPHome names)
+    id: forcible_mode
+    icon: mdi:arrow-up-down
+    options:
+      - "stop"
+      - "charge"
+      - "discharge"
+    initial_option: "stop"
+    optimistic: true
+    restore_value: false     # always start on 'stop' after a reboot; HBC writes it again
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 2
+
+  ## MARSTEK: User Work Mode (what the battery does when HBC has no control)
+  ##   manual          -> no change (Custom / Manual idles at 0 W)
+  ##   anti-feed / ai  -> Self-Consumption (AI)
+  - platform: template
+    name: "User Work Mode"
+    id: user_work_mode
+    icon: mdi:auto-mode
+    options:
+      - "manual"
+      - "anti-feed"
+      - "ai"
+    initial_option: "anti-feed"
+    optimistic: true
+    restore_value: true
+    on_value:
+      - script.execute: apply_control_mode
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 1
+
+  ## AECC energy manager mode. Internal: driven by RS485 Control Mode / User Work Mode.
+  - platform: template
+    name: "Work Mode"
+    id: working_mode
+    internal: true
+    options:
+      - "Self-Consumption (AI)"
+      - "Custom / Manual"
+    initial_option: "Self-Consumption (AI)"
+    optimistic: true
+    restore_value: true        # after a reboot, Custom / Manual is re-applied by on_boot
+    set_action:
+      - if:
+          condition:
+            lambda: 'return x == "Custom / Manual";'
+          then:
+            - script.execute: ems_take_control
+          else:
+            - script.execute: ems_self_consumption
+
+  ## plausible mapping, never confirmed against the app
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Inverter Operating Mode"
+    id: inverter_mode
+    icon: mdi:cog
+    address: 0xA028        # outPriority
+    value_type: U_WORD
+    entity_category: config
+    optionsmap:
+      "Photovoltaic priority (PV)": 0
+      "Utility power priority (GID)": 1
+      "PV Battery Priority (BAT)": 2
+      "Hybrid Priority (HBD)": 3
+      "Unknown": 65535
+    lambda: |-
+      if (x >= 0 && x <= 3) return {};   // known value: use optionsmap
+      ESP_LOGW("select", "Inverter Operating Mode: register holds unknown value %lld", (long long) x);
+      return std::string("Unknown");
+    write_lambda: |-
+      if (x == "Unknown") return {};       // never write the placeholder back
+      return value;
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 23
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Charge Priority"
+    id: charge_priority
+    icon: mdi:battery-charging
+    address: 0xA02E        # chgPriority
+    value_type: U_WORD
+    entity_category: config
+    optionsmap:
+      "Photovoltaic priority (OSO)": 0
+      "Utility Priority (OUO)": 1
+      "Mixed mode (SNU)": 2
+      "PV only (NUC)": 3
+      "Unknown": 65535
+    lambda: |-
+      if (x >= 0 && x <= 3) return {};   // known value: use optionsmap
+      ESP_LOGW("select", "Charge Priority: register holds unknown value %lld", (long long) x);
+      return std::string("Unknown");
+    write_lambda: |-
+      if (x == "Unknown") return {};       // never write the placeholder back
+      return value;
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 24
+
+  ## 'PV to grid' means anti-backflow is OFF
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "On Grid Mode"
+    id: on_grid_mode
+    icon: mdi:transmission-tower-export
+    address: 0xA034        # onGirdSet
+    value_type: U_WORD
+    entity_category: config
+    optionsmap:
+      "PV to load": 0
+      "PV to grid": 1
+      "Anti-backflow (external CT sensor)": 2
+      "Anti-backflow (external smart device)": 3
+      "Unknown": 65535
+    lambda: |-
+      if (x >= 0 && x <= 3) return {};   // known value: use optionsmap
+      ESP_LOGW("select", "On Grid Mode: register holds unknown value %lld", (long long) x);
+      return std::string("Unknown");
+    write_lambda: |-
+      if (x == "Unknown") return {};       // never write the placeholder back
+      return value;
+    web_server:
+      sorting_group_id: Settings
+      sorting_weight: 25
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Utility Range"
+    id: utility_range
+    icon: mdi:arrow-expand-horizontal
+    address: 0xA02B        # lineRangeSet
+    value_type: U_WORD
+    entity_category: config
+    optionsmap:
+      "UPS mode": 0
+      "APL mode": 1
+      "GEN mode": 2
+      "Unknown": 65535
+    lambda: |-
+      if (x >= 0 && x <= 2) return {};   // known value: use optionsmap
+      ESP_LOGW("select", "Utility Range: register holds unknown value %lld", (long long) x);
+      return std::string("Unknown");
+    write_lambda: |-
+      if (x == "Unknown") return {};       // never write the placeholder back
+      return value;
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 26
+
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Parallel Mode"
+    id: parallel_mode
+    icon: mdi:vector-link
+    address: 0xA02C        # paraModeSet
+    value_type: U_WORD
+    entity_category: config
+    disabled_by_default: true
+    optionsmap:
+      "Stand-alone": 0
+      "Parallel operation": 1
+      "Split phase reference phase": 2
+      "Split phase 120 deg": 3
+      "Split phase 180 deg": 4
+      "Three phase - phase 1": 5
+      "Three phase - phase 2": 6
+      "Three phase - phase 3": 7
+      "Unknown": 65535
+    lambda: |-
+      if (x >= 0 && x <= 7) return {};   // known value: use optionsmap
+      ESP_LOGW("select", "Parallel Mode: register holds unknown value %lld", (long long) x);
+      return std::string("Unknown");
+    write_lambda: |-
+      if (x == "Unknown") return {};       // never write the placeholder back
+      return value;
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 27
+
+  ## wrong value can damage the pack
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Battery Type"
+    id: battery_type
+    icon: mdi:battery-unknown
+    address: 0xA08C        # batType
+    value_type: U_WORD
+    entity_category: config
+    disabled_by_default: true
+    optionsmap:
+      "Custom Type": 0
+      "SLD Sealed Lead Acid": 1
+      "FLD Flooded Lead Acid": 2
+      "GEL Gel Lead Acid": 3
+      "LiFePO4 14S": 4
+      "LiFePO4 15S": 5
+      "LiFePO4 16S": 6
+      "LiFePO4 7S": 7
+      "LiFePO4 8S": 8
+      "LiFePO4 9S": 9
+      "Ternary Lithium 7S": 10
+      "Ternary Lithium 8S": 11
+      "Ternary Lithium 13S": 12
+      "Ternary Lithium 14S": 13
+      "Unknown": 65535
+    lambda: |-
+      if (x >= 0 && x <= 13) return {};   // known value: use optionsmap
+      ESP_LOGW("select", "Battery Type: register holds unknown value %lld", (long long) x);
+      return std::string("Unknown");
+    write_lambda: |-
+      if (x == "Unknown") return {};       // never write the placeholder back
+      return value;
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 28
+
+  ## makstech's unit ships on 1 = Pylon; this battery reads 18 (no name known). Do not change.
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "BMS Protocol"
+    id: bms_protocol
+    icon: mdi:protocol
+    address: 0xA09A        # bmsProtocal
+    value_type: U_WORD
+    entity_category: config
+    disabled_by_default: true
+    optionsmap:
+      "Voltronic": 0
+      "Pylon": 1
+      "Aoguan": 2
+      "Oulite": 3
+      "Gotion": 4
+      "Sunwoda": 5
+      "CF": 6
+      "Dyuness": 7
+      "Pace": 8
+      "BST": 9
+      "Foxess": 10
+      "AEC": 11
+      "Pylon-V3.5": 12
+      "MeZic-V3.5": 13
+      "Tentek": 14
+      "Rvtran": 15
+      "YUZE": 16
+      "EVT": 17
+      "Factory protocol 18 (this unit)": 18   # read from this battery; not in the makstech list (0-17)
+      "Unknown": 65535
+    lambda: |-
+      if (x >= 0 && x <= 18) return {};   // known value: use optionsmap
+      ESP_LOGW("select", "BMS Protocol: register holds unknown value %lld", (long long) x);
+      return std::string("Unknown");
+    write_lambda: |-
+      if (x == "Unknown") return {};       // never write the placeholder back
+      return value;
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 29
+
+  ## Netherlands normally uses EN50549
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Grid Standard"
+    id: grid_standard
+    icon: mdi:certificate
+    address: 0xA043        # gridStandardSet
+    value_type: U_WORD
+    entity_category: config
+    disabled_by_default: true
+    optionsmap:
+      "GNL": 0
+      "VDE4105": 1
+      "IEEE1547": 2
+      "CEI-021": 3
+      "VDE0126": 4
+      "EN50549 (General)": 5
+      "EN50549-SE (Switzerland)": 6
+      "EN50549-DK1 (Denmark)": 7
+      "SI4777 (Israel)": 8
+      "TOR-Z1 (Austria)": 9
+      "EN50549-PL (Poland)": 10
+      "Unknown": 65535
+    lambda: |-
+      if (x >= 0 && x <= 10) return {};   // known value: use optionsmap
+      ESP_LOGW("select", "Grid Standard: register holds unknown value %lld", (long long) x);
+      return std::string("Unknown");
+    write_lambda: |-
+      if (x == "Unknown") return {};       // never write the placeholder back
+      return value;
+    web_server:
+      sorting_group_id: Advanced
+      sorting_weight: 30
+
+###############################################################################
+## JSON API CLIENT (energy manager on ${aecc_ip}:${aecc_port})
+###############################################################################
+globals:
+  - id: ems_state            # 0 idle, 1 request running in background task, 2 reply ready
+    type: std::atomic<int>
+  - id: ems_serial
+    type: int
+    initial_value: '0'
+  - id: ems_reply
+    type: std::string
+  - id: ems_error_count
+    type: int
+    initial_value: '0'
+  - id: desired_power        # W, target after SOC limits, as written to 0xFE16
+    type: int
+    initial_value: '0'
+  - id: desired_since_ms
+    type: uint32_t
+    initial_value: '0'
+  - id: slot_power_sent      # W in slot 3003 confirmed by the battery (99999 = unknown)
+    type: int
+    initial_value: '99999'
+  - id: slot_power_pending   # W in a slot write awaiting its reply (99999 = none)
+    type: int
+    initial_value: '99999'
+  - id: last_slot_send_ms
+    type: uint32_t
+    initial_value: '0'
+  - id: setpoint_fallbacks   # consecutive readings where 0xFE16 did not hold the target
+    type: int
+    initial_value: '0'
+  - id: last_takeover_ms     # last time the energy manager setup was re-sent by the watchdog
+    type: uint32_t
+    initial_value: '0'
+
+script:
+  ## Translate the Marstek selects into the AECC Work Mode (idempotent: only changes what differs).
+  ##   RS485 enable                 -> Custom / Manual (setpoint from the Forcible selects, 1 s loop)
+  ##   RS485 disable + anti-feed/ai -> Self-Consumption (AI)
+  ##   RS485 disable + manual       -> unchanged (Custom / Manual then idles at 0 W)
+  ## Skipped during the first 20 s (values restored at boot); on_boot calls it afterwards.
+  - id: apply_control_mode
+    mode: queued
+    max_runs: 3
+    then:
+      - if:
+          condition:
+            lambda: 'return millis() > 20000;'
+          then:
+            - if:
+                condition:
+                  select.is:
+                    id: rs485_control_mode
+                    options: "enable"
+                then:
+                  - if:
+                      condition:
+                        not:
+                          select.is:
+                            id: working_mode
+                            options: "Custom / Manual"
+                      then:
+                        - logger.log: "HBC took control: Custom / Manual"
+                        - select.set:
+                            id: working_mode
+                            option: "Custom / Manual"
+                else:
+                  - if:
+                      condition:
+                        and:
+                          - select.is:
+                              id: user_work_mode
+                              options: ["anti-feed", "ai"]
+                          - not:
+                              select.is:
+                                id: working_mode
+                                options: "Self-Consumption (AI)"
+                      then:
+                        - logger.log: "HBC released control: Self-Consumption (AI)"
+                        - select.set:
+                            id: working_mode
+                            option: "Self-Consumption (AI)"
+
+  ## Enable the energy manager in custom mode. Slot 3003 carries the current target (as in
+  ## StekkerDeal/aecc-battery-local), so the battery's own fallback command equals the target.
+  ## 0 W -> idle slot (as StekkerDeal): the battery holds 0 W. 3026/3029 (base discharge) are forced
+  ## off: positive values export unconditionally.
+  - id: ems_take_control
+    mode: restart
+    then:
+      - script.execute:
+          id: ems_send
+          body: !lambda |-
+            int w = id(desired_power);
+            int min_soc = (std::isnan(id(discharge_limit).state) ? ${ems_min_soc} : (int) lroundf(id(discharge_limit).state));
+            int max_soc = (std::isnan(id(charge_limit).state) ? ${ems_max_soc} : (int) lroundf(id(charge_limit).state));
+            char slot[64];
+            if (w == 0)
+              snprintf(slot, sizeof(slot), "0,00:00,00:00,0,0,0,0,0,0,%d,%d", max_soc, min_soc);
+            else
+              snprintf(slot, sizeof(slot), "1,00:00,23:59,%d,0,6,5,0,0,%d,%d", w, max_soc, min_soc);
+            id(slot_power_pending) = w;
+            id(last_slot_send_ms) = millis();
+            float mc = id(max_charge_power).state, md = id(max_discharge_power).state;
+            int cap = (int) lroundf(std::max(std::isnan(mc) ? ${ems_max_charge}.0f : mc,
+                                             std::isnan(md) ? ${ems_max_discharge}.0f : md));
+            char extra[96];
+            snprintf(extra, sizeof(extra), "\"3023\":\"%d\",\"3024\":\"%d\",\"3039\":\"%d\",",
+                     min_soc, max_soc, cap);
+            return std::string("\"Set\":\"Energycontrolparameters\",\"SetControlInfo\":{"
+                               "\"3000\":\"1\",\"3020\":\"6\",\"3021\":\"0\",\"3022\":\"0\","
+                               "\"3026\":\"0\",\"3029\":\"0\",\"3030\":\"1\",") + extra + "\"3003\":\"" + slot + "\"}";
+
+  ## A SOC limit changed: send it to the battery (not during the first 30 s, when values are restored at boot).
+  ## Custom / Manual: force the slot interval to re-send the setup. Self-Consumption: re-send that mode.
+  ## Waits 3 s so moving the slider sends only the final value.
+  - id: soc_limits_changed
+    mode: restart
+    then:
+      - delay: 3s
+      - if:
+          condition:
+            lambda: 'return millis() > 30000;'
+          then:
+            - if:
+                condition:
+                  select.is:
+                    id: working_mode
+                    options: "Custom / Manual"
+                then:
+                  - lambda: 'id(slot_power_sent) = 99999;'
+                else:
+                  - script.execute: ems_self_consumption
+
+  ## Hand the battery back to its own self-consumption AI (registers as in StekkerDeal/aecc-battery-local).
+  ## The cleared slot 3003 stops the firmware executing the old manual command.
+  - id: ems_self_consumption
+    mode: restart
+    then:
+      - script.execute:
+          id: ems_send
+          body: !lambda |-
+            int min_soc = (std::isnan(id(discharge_limit).state) ? ${ems_min_soc} : (int) lroundf(id(discharge_limit).state));
+            int max_soc = (std::isnan(id(charge_limit).state) ? ${ems_max_soc} : (int) lroundf(id(charge_limit).state));
+            char buf[256];
+            snprintf(buf, sizeof(buf),
+                     "\"Set\":\"Energycontrolparameters\",\"SetControlInfo\":{\"3000\":\"1\",\"3020\":\"3\","
+                     "\"3021\":\"1\",\"3022\":\"1\",\"3030\":\"0\",\"3023\":\"%d\",\"3024\":\"%d\","
+                     "\"3003\":\"0,00:00,00:00,0,0,0,0,0,0,%d,%d\"}",
+                     min_soc, max_soc, max_soc, min_soc);
+            return std::string(buf);
+
+  ## Sends one newline-terminated JSON request in a background FreeRTOS task (never blocks the main loop).
+  ## Requests are queued; one at a time, since the datalogger only serves one client.
+  - id: ems_send
+    mode: queued
+    max_runs: 5
+    parameters:
+      body: string
+    then:
+      - wait_until:
+          condition:
+            lambda: 'return id(ems_state).load() == 0;'
+          timeout: 60s             # a request can take up to 3 x 10 s
+      - lambda: |-
+          if (id(ems_state).load() != 0) {
+            ESP_LOGW("ems", "previous JSON request still running, request dropped");
+            return;
+          }
+          id(ems_state).store(1);
+          auto *req = new std::string("{" + body + ",\"SerialNumber\":" +
+                                      std::to_string(++id(ems_serial)) + ",\"CommandSource\":\"HA\"}\n");
+          ESP_LOGI("ems", "-> %s", req->c_str());
+          auto task = [](void *arg) {
+            std::string *rq = static_cast<std::string *>(arg);
+            std::string reply;
+            // The battery's WiFi module sometimes does not answer (busy / slow WiFi):
+            // try up to 3 times, 2 s apart, before reporting an error.
+            for (int attempt = 1; attempt <= 3; attempt++) {
+              reply.clear();
+              int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+              if (fd < 0) {
+                reply = "ERROR: no socket";
+              } else {
+                struct sockaddr_in addr {};
+                addr.sin_family = AF_INET;
+                addr.sin_port = htons(${aecc_port});
+                if (::inet_pton(AF_INET, "${aecc_ip}", &addr.sin_addr) != 1) {
+                  reply = "ERROR: invalid aecc_ip '${aecc_ip}'";
+                  ::close(fd);
+                  break;   // retrying will not help
+                }
+                // non-blocking connect with a 3 s timeout
+                ::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+                int rc = ::connect(fd, (struct sockaddr *) &addr, sizeof(addr));
+                bool connected = (rc == 0);
+                if (!connected && errno == EINPROGRESS) {
+                  fd_set wset; FD_ZERO(&wset); FD_SET(fd, &wset);
+                  struct timeval tv {3, 0};
+                  if (::select(fd + 1, nullptr, &wset, nullptr, &tv) > 0) {
+                    int err = 0; socklen_t len = sizeof(err);
+                    ::getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
+                    connected = (err == 0);
+                  }
+                }
+                if (!connected) {
+                  reply = "ERROR: cannot connect to ${aecc_ip}:${aecc_port}";
+                } else {
+                  ::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL, 0) & ~O_NONBLOCK);
+                  struct timeval to {1, 0};   // poll in 1 s steps, up to the 10 s reply window
+                  ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof(to));
+                  ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof(to));
+                  if (::send(fd, rq->data(), rq->size(), 0) != (int) rq->size()) {
+                    reply = "ERROR: send failed";
+                  } else {
+                    // Read until one complete JSON object has arrived: replies can span several
+                    // lines (StekkerDeal/aecc-battery-local), and the module can take up to ~10 s.
+                    char buf[512];
+                    int depth = 0; bool started = false, in_str = false, esc = false, done = false;
+                    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(10000);
+                    while (!done && reply.size() < 8192 && (int32_t) (deadline - xTaskGetTickCount()) > 0) {
+                      int n = ::recv(fd, buf, sizeof(buf), 0);
+                      if (n == 0) break;                                    // connection closed
+                      if (n < 0) { if (errno == EAGAIN || errno == EWOULDBLOCK) continue; break; }
+                      for (int i = 0; i < n && !done; i++) {
+                        char c = buf[i];
+                        reply += c;
+                        if (in_str) { if (esc) esc = false; else if (c == '\\') esc = true; else if (c == '"') in_str = false; }
+                        else if (c == '"') in_str = true;
+                        else if (c == '{') { depth++; started = true; }
+                        else if (c == '}' && started && --depth == 0) done = true;
+                      }
+                    }
+                    if (reply.empty())
+                      reply = "ERROR: no reply";
+                    else if (!done)
+                      reply = "ERROR: incomplete reply: " + reply.substr(0, 120);
+                  }
+                }
+                ::close(fd);
+              }
+              if (reply.rfind("ERROR", 0) != 0) break;   // got an answer
+              if (attempt < 3) vTaskDelay(pdMS_TO_TICKS(2000));
+              else reply += " (after 3 attempts)";
+            }
+            while (!reply.empty() && (reply.back() == '\n' || reply.back() == '\r'))
+              reply.pop_back();
+            id(ems_reply) = reply;
+            id(ems_state).store(2);   // hand the reply to the main loop
+            delete rq;
+            vTaskDelete(nullptr);
+          };
+          if (xTaskCreate(task, "aecc_ems", 6144, req, 1, nullptr) != pdPASS) {
+            delete req;
+            id(ems_state).store(0);
+            ESP_LOGW("ems", "could not start JSON task");
+          }
+
+  ## knop op de atom ingedrukt houden = veranderen brightness
+  - id: adjust_brightness_loop
+    mode: restart
+    then:
+      - repeat:
+          count: 1000
+          then:
+            - lambda: |-
+                static float brightness = 0.0;
+                brightness += 0.1;
+                if (brightness > 1.0) brightness = 0.0;
+                auto call = id(status_led).make_call();
+                call.set_brightness(brightness);
+                call.perform();
+            - delay: 750ms
+
+###############################################################################
+## STATUS LED
+###############################################################################
+## Simple status led for Atom s3 (lite)
+## G35=RGB WS2812C-2020
+light:
+  - name: "Status led"
+    id: status_led
+    icon: mdi:lightbulb
+    platform: esp32_rmt_led_strip
+    internal: true # Hides from Home Assistant
+    channel_colors: GRB
+    pin: 35
+    num_leds: 1   # the AtomS3 Lite has a single LED
+    chipset: ws2812
+#    rmt_channel: 0 #only on platform: arduino
+    restore_mode: ALWAYS_OFF
+    entity_category: diagnostic
+    effects:
+      - pulse:
+          name: slow_pulse
+          transition_length: 250ms
+          update_interval: 500ms
+          min_brightness: 10%
+          max_brightness: 50%
+      - pulse:
+          name: fast_pulse
+          transition_length: 100ms
+          update_interval: 100ms
+          min_brightness: 25%
+          max_brightness: 100%
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 13
+
+# 🟢 Green on => wifi connected- api connected/ Green blinking => wifi connected - api disconnected
+# 🟣 Purple => wifi disconnected
+# 🔵 Blue => AP mode
+
+interval:
+  ## Power control loop: in Custom / Manual mode, turn the HBC commands into a setpoint and
+  ## write it to 0xFE16 every second.
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            select.is:
+              id: working_mode
+              options: "Custom / Manual"
+          then:
+            - lambda: |-
+                // HBC / Marstek command, + = charge
+                float cmd = 0;
+                if (id(rs485_control_mode).active_index().value_or(0) == 1) {          // enable
+                  size_t m = id(forcible_mode).active_index().value_or(0);
+                  if (m == 1) cmd = id(forcible_charge_power).state;                  // charge
+                  else if (m == 2) cmd = -id(forcible_discharge_power).state;         // discharge
+                }
+                if (std::isnan(cmd)) cmd = 0;
+                float target = -cmd;   // register convention: + = discharge
+                float soc = id(battery_state_of_charge).state;
+                if (!std::isnan(soc)) {
+                  if (target > 0 && soc <= (std::isnan(id(discharge_limit).state) ? ${ems_min_soc} : (int) lroundf(id(discharge_limit).state))) target = 0;   // Discharge Limit reached: no discharge
+                  if (target < 0 && soc >= (std::isnan(id(charge_limit).state) ? ${ems_max_soc} : (int) lroundf(id(charge_limit).state))) target = 0;   // Charge Limit reached: no charge
+                }
+                float max_dis = id(max_discharge_power).state, max_chg = id(max_charge_power).state;
+                if (!std::isnan(max_dis) && target > max_dis) target = max_dis;      // discharge limit
+                if (!std::isnan(max_chg) && target < -max_chg) target = -max_chg;    // charge limit
+                int w = (int) lroundf(target);
+                if (w != id(desired_power)) {
+                  id(desired_power) = w;
+                  id(desired_since_ms) = millis();
+                }
+                auto call = id(setpoint_writer).make_call();   // writes 0xFE16 (FC6)
+                call.set_value(w);
+                call.perform();
+
+  ## Keep schedule slot 3003 (what the battery runs when a 0xFE16 write is missed) equal to the
+  ## target, so a missed write no longer changes the battery power. Updated over JSON once the
+  ## target has been stable for 2 s, at most every ${ems_slot_min_interval} s.
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            and:
+              - select.is:
+                  id: working_mode
+                  options: "Custom / Manual"
+              - lambda: |-
+                  return id(ems_state).load() == 0 &&
+                         id(slot_power_pending) == 99999 &&
+                         id(desired_power) != id(slot_power_sent) &&
+                         millis() - id(desired_since_ms) > 2000 &&
+                         millis() - id(last_slot_send_ms) > ${ems_slot_min_interval} * 1000UL;
+          then:
+            - script.execute: ems_take_control
+
+  ## Reassert the energy manager setup (the vendor app's AI mode rewrites it).
+  - interval: 5min
+    then:
+      - if:
+          condition:
+            select.is:
+              id: working_mode
+              options: "Custom / Manual"
+          then:
+            - script.execute: ems_take_control
+
+  ## Publish JSON replies from the background task (on the main loop, where it is safe).
+  - interval: 250ms
+    then:
+      - lambda: |-
+          if (id(ems_state).load() == 2) {
+            std::string r = id(ems_reply);
+            id(ems_state).store(0);
+            if (id(slot_power_pending) != 99999) {
+              bool ok = r.rfind("ERROR", 0) != 0 && r.find("SetParameters") != std::string::npos &&
+                        r.find("fail") == std::string::npos && r.find("rror") == std::string::npos;
+              if (ok) {
+                id(slot_power_sent) = id(slot_power_pending);
+                ESP_LOGI("ems", "slot 3003 now %d W", id(slot_power_sent));
+              } else {
+                id(slot_power_sent) = 99999;   // unknown: retried by the slot interval
+              }
+              id(slot_power_pending) = 99999;
+            }
+            if (r.rfind("ERROR", 0) == 0) {
+              // keep showing the last good reply; only log + count the failure
+              ESP_LOGW("ems", "<- %s", r.c_str());
+              id(ems_error_count) += 1;
+              id(ems_errors).publish_state(id(ems_error_count));
+              return;
+            }
+            ESP_LOGI("ems", "<- %s", r.c_str());
+            if (r.size() > 250) r = r.substr(0, 247) + "...";
+            id(ems_reply_text).publish_state(r);
+          }
+
+  - interval: 10s
+    then:
+      if:
+        condition:
+          wifi.connected:
+        then:
+          if:
+            condition:
+              api.connected:
+            then:
+              - light.turn_on:
+                  id: status_led
+                  brightness: 50%
+                  red: 0
+                  green: 100%
+                  blue: 0
+                  effect: None
+            else:
+              - light.turn_on:
+                  id: status_led
+                  brightness: 50%
+                  red: 0
+                  green: 100%
+                  blue: 0
+                  effect: slow_pulse              
+        else:
+          if:
+            condition:
+              - lambda: 'return id(id_captive_portal).is_active();'
+            then:
+              - light.turn_on:
+                  id: status_led
+                  brightness: 100%
+                  red: 0
+                  green: 0
+                  blue: 100%
+            else:
+              - light.turn_on:
+                  id: status_led
+                  brightness: 100%
+                  red: 100%
+                  green: 0
+                  blue: 0
