@@ -1,17 +1,18 @@
 substitutions:
   name: aecc-battery    
   friendly_name: aecc-battery  
-  
-## Version 1.0 - Added full AECC register map from github.com/makstech/esphome-aecc
-##                (docs/REGISTERS.md + components/aecc/registers.h)
-#
-# AECC Modbus quirks (from makstech/esphome-aecc docs/PROTOCOL.md):
-#   - slave 1, 9600 8N1, only function codes 3 (read) and 6 (write single) exist
-#   - max 32 registers per read, leave >= 12 ms between frames
-#   - NEVER probe unknown addresses: a run of illegal-address reads can hang the inverter.
-#     Known-valid islands: 0x9AC0-0x9B13, 0x9C40-0x9C4B, 0xA028-0xA0F9, plus telemetry 0xFE06-0xFE1F
-#   - settings verified on a Humsienk HSBPSS2K5W7K68WHEU; enum values/defaults can differ
-#     on other builds, so read a value back before trusting it.
+
+  ## ---- Power control via the battery's own WiFi module (JSON API, TCP 8080) ----
+  aecc_ip: "192.168.0.132"     # <-- IP address of the battery's WiFi module (give it a DHCP reservation)
+  aecc_port: "8080"
+  ems_slot_min_interval: "10"   # s, minimum time between JSON updates of schedule slot 3003 (the battery's fallback command)
+  ems_min_soc: "15"             # %, default of "Discharge Limit" (no discharging at or below this SOC)
+  ems_max_soc: "100"            # %, default of "Charge Limit" (no charging at or above this SOC)
+  ems_max_charge: "2400"        # W, hardware maximum charge power: upper end of "Max Charge Power" and its default
+  ems_max_discharge: "2400"     # W, hardware maximum discharge power: upper end of "Max Discharge Power" and its default
+
+## Version 1.0 - AECC battery over RS485 (Modbus) with local power control via the JSON API (port 8080)
+##               Register map: makstech/esphome-aecc; work modes and names: StekkerDeal/aecc-battery-local
 #
 
 esphome:
@@ -19,6 +20,28 @@ esphome:
   # friendly_name: ${friendly_name}  ### temporarely uncommented because of sensor naming wrong
   min_version: 2026.9.0   # needed for modbus turnaround_time
   name_add_mac_suffix: false
+  includes:                # needed for the JSON API client (TCP sockets + background task)
+    - <sys/socket.h>
+    - <netinet/in.h>
+    - <arpa/inet.h>
+    - <fcntl.h>
+    - <unistd.h>
+    - <cerrno>
+    - <atomic>
+    - <string>
+    - <freertos/FreeRTOS.h>
+    - <freertos/task.h>
+  on_boot:
+    priority: -200
+    then:
+      - delay: 20s
+      - if:
+          condition:
+            select.is:
+              id: working_mode
+              options: "Custom / Manual"
+          then:
+            - script.execute: ems_take_control
 
 esp32:
   board: esp32-s3-devkitc-1  ## M5stack Atom S3 lite  
@@ -37,6 +60,7 @@ esp32:
 logger:
   logs:
     component: ERROR
+    modbus.number: WARN    # the setpoint writer logs every 1 s write at DEBUG
   
 ## Enable Home Assistant API
 api:
@@ -117,7 +141,8 @@ uart:
 modbus:
   - uart_id: mod_bus
     id: modbus1
-    send_wait_time: 20ms
+    send_wait_time: 350ms   # how long to wait for a reply; same reply window as makstech/esphome-aecc
+                            # (was 20 ms: too short, the inverter often answers later -> lost frames/writes)
     turnaround_time: 15ms   # AECC needs >= 12 ms between frames; default (600 ms) is needlessly slow
 
 modbus_controller:
@@ -135,7 +160,7 @@ modbus_controller:
   - id: mt_slow
     address: 0x1
     modbus_id: modbus1
-    update_interval: 300s    # settings (numbers / selects / switches)
+    update_interval: 600s    # settings (numbers / selects / switches); ~25 reads in one burst, so keep it rare
 
 # Uart logging on/off switch
 switch:
@@ -154,6 +179,25 @@ switch:
       sorting_group_id: Diagnostic
       sorting_weight: 20
       
+###############################################################################
+## POWER CONTROL
+## How it works (from makstech/esphome-aecc docs/PROTOCOL.md):
+##  1. The energy manager (JSON API on ${aecc_ip}:${aecc_port}, NOT on Modbus) must be enabled,
+##     in custom mode, with schedule slot 3003 running a command. The slot holds the target itself.
+##  2. 0xFE16 (Modbus) is written every second for a fast response; when a write is missed
+##     the battery falls back to the slot, which equals the target, so nothing changes.
+##  3. The vendor app's AI mode rewrites the energy manager settings, so they are reasserted
+##     every 5 minutes while Work Mode is "Custom / Manual".
+## Work Mode (dropdown, Control group), same modes and registers as StekkerDeal/aecc-battery-local:
+##   Self-Consumption (AI): 3000=1, 3020=3, 3021=1, 3022=1, 3030=0, slot 3003 cleared -> battery's own AI
+##   Custom / Manual:       3000=1, 3020=6, 3021=0, 3022=0, 3030=1, slot 3003 = target power,
+##                          3039 = max(Max Charge Power, Max Discharge Power) (local TCP control is capped
+##                          at 800 W unless 3039 is raised)
+##   Both:                  3023 = Discharge Limit, 3024 = Charge Limit (the slot carries them as well)
+##                          -> Power Setpoint is written to 0xFE16 every second
+## The JSON API serves ONE client at a time: close the vendor app / disable any HA integration
+## that talks to the battery on port 8080, otherwise requests here get no reply.
+###############################################################################
 ## AECC on/off settings (0 = off, 1 = on)
   - platform: modbus_controller
     modbus_controller_id: mt_slow
@@ -282,12 +326,40 @@ switch:
 # "Device Name" (register 31000) removed: that is a Marstek Venus register. It does not
 # exist on the AECC inverter, and repeated reads of invalid addresses can make the
 # inverter stop answering Modbus altogether.
+button:
+  - platform: template
+    name: "Read EMS Config"
+    id: ems_read_config
+    icon: mdi:download-network
+    entity_category: diagnostic
+    on_press:
+      - script.execute:
+          id: ems_send
+          body: '"Get":"Energycontrolparameters","RegControlAddr":[3000,3003,3020,3021,3022,3026,3029,3030,3039]'
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 3
+
 text_sensor:
   - platform: template
-    name: "Device Status"
-    id: device_status
-    icon: mdi:list-status
-    update_interval: never   # filled by "Device Status Code" (register 65039)
+    name: "EMS Reply"
+    id: ems_reply_text
+    icon: mdi:code-json
+    entity_category: diagnostic
+    update_interval: never   # last reply from the battery's JSON API (truncated to 250 chars)
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 4
+
+binary_sensor:
+  - platform: modbus_controller
+    modbus_controller_id: mt
+    name: "Fault"
+    id: fault
+    device_class: problem
+    register_type: holding
+    address: 0xFE0F        # 65039, device status: 0 normal, 1 fault (StekkerDeal)
+    bitmask: 0xFFFF        # any non-zero value = fault
     web_server:
       sorting_group_id: Status
       sorting_weight: 0
@@ -329,7 +401,7 @@ sensor:
 
 ## Live telemetry, 65030-65046 (0xFE06-0xFE16). Read in one block by modbus_controller.
 
-  - name: "Battery State Of Charge"
+  - name: "Battery SOC"
     id: battery_state_of_charge
     icon: mdi:power-plug-battery-outline
     platform: modbus_controller
@@ -351,8 +423,10 @@ sensor:
     platform: modbus_controller
     modbus_controller_id: mt
     register_type: holding
-    address: 0xFE07        # 65031, + = discharging, - = charging
+    address: 0xFE07        # 65031, register: + = discharging; shown as + = charging (StekkerDeal)
     value_type: S_WORD
+    filters:
+      - multiply: -1
     unit_of_measurement: "W"
     device_class: power
     state_class: measurement
@@ -361,26 +435,11 @@ sensor:
       sorting_group_id: Info
       sorting_weight: 7
 
-  - name: "Battery Charge Power"
+  - name: "Battery Charging Power"
     id: battery_charge_power
     platform: copy
     source_id: battery_power
     icon: mdi:battery-arrow-up
-    filters:
-      - lambda: "return x < 0 ? -x : 0;"
-    unit_of_measurement: "W"
-    device_class: power
-    state_class: measurement
-    accuracy_decimals: 0
-    web_server:
-      sorting_group_id: Info
-      sorting_weight: 8
-
-  - name: "Battery Discharge Power"
-    id: battery_discharge_power
-    platform: copy
-    source_id: battery_power
-    icon: mdi:battery-arrow-down
     filters:
       - lambda: "return x > 0 ? x : 0;"
     unit_of_measurement: "W"
@@ -389,9 +448,24 @@ sensor:
     accuracy_decimals: 0
     web_server:
       sorting_group_id: Info
+      sorting_weight: 8
+
+  - name: "Battery Discharging Power"
+    id: battery_discharge_power
+    platform: copy
+    source_id: battery_power
+    icon: mdi:battery-arrow-down
+    filters:
+      - lambda: "return x < 0 ? -x : 0;"
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    web_server:
+      sorting_group_id: Info
       sorting_weight: 9
 
-  - name: "AC Charge Or Losses Power"
+  - name: "AC Charging Power"
     id: losses_power
     icon: mdi:transmission-tower-import
     platform: modbus_controller
@@ -423,7 +497,7 @@ sensor:
       sorting_group_id: Info
       sorting_weight: 11
 
-  - name: "Backup (EPS) Load"
+  - name: "Backup Power"
     id: backup_load
     icon: mdi:power-socket-eu
     platform: modbus_controller
@@ -445,7 +519,49 @@ sensor:
     platform: modbus_controller
     modbus_controller_id: mt
     register_type: holding
-    address: 0xFE16        # 65046, + = discharging, - = charging
+    address: 0xFE16        # 65046, register: + = discharging; shown as + = charging
+    value_type: S_WORD
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - multiply: -1
+    ## Watchdog (Custom / Manual only): if 0xFE16 reads something other than the target
+    ## (non-zero) for 2 readings in a row (~10 s), re-send the energy manager setup (max once per minute).
+    on_value:
+      - lambda: |-
+          if (id(working_mode).active_index().value_or(0) != 1) { id(setpoint_fallbacks) = 0; return; }   // not Custom / Manual
+          if (std::isnan(x)) return;
+          float reg = -x;                        // back to register convention (+ = discharge)
+          float target = id(desired_power);      // register convention
+          // ignore the first seconds after a target change (write + read may cross)
+          if (millis() - id(desired_since_ms) < 6000) { id(setpoint_fallbacks) = 0; return; }
+          bool fallback = lroundf(reg) != id(desired_power) && id(desired_power) != 0;
+          if (!fallback) { id(setpoint_fallbacks) = 0; return; }
+          id(setpoint_fallbacks) += 1;
+          id(setpoint_fallback_total).publish_state(
+              (std::isnan(id(setpoint_fallback_total).state) ? 0 : id(setpoint_fallback_total).state) + 1);
+          ESP_LOGW("ems", "setpoint reads %.0f W instead of %.0f W (+ = charge), %d in a row",
+                   x, -target, id(setpoint_fallbacks));
+          if (id(setpoint_fallbacks) >= 2 && millis() - id(last_takeover_ms) > 60000) {
+            id(last_takeover_ms) = millis();
+            id(setpoint_fallbacks) = 0;
+            ESP_LOGW("ems", "re-sending energy manager setup");
+            id(slot_power_sent) = 99999;
+            id(ems_take_control).execute();
+          }
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 13
+
+  - name: "Available Charge Power"
+    id: available_charge_power
+    icon: mdi:battery-arrow-up-outline
+    platform: modbus_controller
+    modbus_controller_id: mt
+    register_type: holding
+    address: 0xFE09        # 65033
     value_type: S_WORD
     unit_of_measurement: "W"
     device_class: power
@@ -453,7 +569,134 @@ sensor:
     accuracy_decimals: 0
     web_server:
       sorting_group_id: Info
-      sorting_weight: 13
+      sorting_weight: 15
+
+  - name: "Nominal Power"
+    id: nominal_power
+    icon: mdi:gauge
+    platform: modbus_controller
+    modbus_controller_id: mt_slow
+    register_type: holding
+    address: 0xFE0B        # 65035
+    value_type: S_WORD
+    unit_of_measurement: "W"
+    device_class: power
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 30
+
+  - name: "Nominal Battery Power"
+    id: nominal_battery_power
+    icon: mdi:gauge
+    platform: modbus_controller
+    modbus_controller_id: mt_slow
+    register_type: holding
+    address: 0xFE0D        # 65037
+    value_type: S_WORD
+    unit_of_measurement: "W"
+    device_class: power
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 31
+
+  - name: "Alarm Flags"
+    id: alarm_flags
+    icon: mdi:alert-circle-outline
+    platform: modbus_controller
+    modbus_controller_id: mt_30s
+    register_type: holding
+    address: 0xFE1B        # 65051-65052, 32-bit, low word first; bit meanings unknown
+    value_type: U_DWORD_R
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: Diagnostic
+      sorting_weight: 32
+
+## Lifetime energy counters, 52050-52053 and 52080-52081: 32-bit, low word first, 0.1 kWh
+## (StekkerDeal/aecc-battery-local). Counted at the battery, behind the inverter. Read every 10 min.
+## Not confirmed on RS485: if the log shows Modbus errors for these addresses, remove them.
+  - name: "Lifetime Energy Charged"
+    id: lifetime_energy_charged
+    icon: mdi:battery-charging
+    platform: modbus_controller
+    modbus_controller_id: mt_slow
+    register_type: holding
+    address: 52050
+    value_type: U_DWORD_R
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    on_value:
+      - component.update: lifetime_rte
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 20
+
+  - name: "Lifetime Energy Discharged"
+    id: lifetime_energy_discharged
+    icon: mdi:battery-arrow-down-outline
+    platform: modbus_controller
+    modbus_controller_id: mt_slow
+    register_type: holding
+    address: 52052
+    value_type: U_DWORD_R
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    on_value:
+      - component.update: lifetime_rte
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 21
+
+  ## Round-trip efficiency = Lifetime Energy Discharged / Lifetime Energy Charged x 100.
+  ## NaN (unknown) while either counter is unknown or nothing has been charged yet.
+  ## Recalculated whenever one of the two counters gets a new value.
+  - platform: template
+    name: "Lifetime RTE"
+    id: lifetime_rte
+    icon: mdi:battery-sync
+    unit_of_measurement: "%"
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: never
+    lambda: |-
+      float charged = id(lifetime_energy_charged).state;
+      float discharged = id(lifetime_energy_discharged).state;
+      if (std::isnan(charged) || std::isnan(discharged) || charged <= 0.0f) return NAN;
+      return discharged / charged * 100.0f;
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 23
+
+  - name: "Lifetime Energy to Grid"
+    id: lifetime_energy_to_grid
+    icon: mdi:transmission-tower-export
+    platform: modbus_controller
+    modbus_controller_id: mt_slow
+    register_type: holding
+    address: 52080
+    value_type: U_DWORD_R
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+    web_server:
+      sorting_group_id: Info
+      sorting_weight: 22
 
   - name: "PV Power"
     id: pv_power
@@ -474,9 +717,34 @@ sensor:
       sorting_weight: 14
 
 
-## Temperatures, 30073-30075 (0x7579-0x757B), signed, 0.1 °C.
+  - platform: template
+    name: "EMS Errors"
+    id: ems_errors
+    icon: mdi:alert-circle-outline
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    state_class: total_increasing
+    update_interval: never     # JSON requests that failed after 3 attempts (since boot)
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 5
+
+  - platform: template
+    name: "Setpoint Fallbacks"
+    id: setpoint_fallback_total
+    icon: mdi:backup-restore
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    state_class: total_increasing
+    update_interval: never     # readings where 0xFE16 did not hold the target
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 6
+
+## Temperatures, 30073-30075 (0x7579-0x757B), signed, 0.1 °C. Labels as in the vendor app /
+## StekkerDeal: the app numbers the first two the other way round from the registers.
 ## Source: Lunergy Modbus TCP handleiding. Read as one 3-register block every 30 s (mt_30s).
-  - name: "Inverter Temperature"
+  - name: "PV Radiator Temperature"
     id: temperature_1
     icon: mdi:thermometer
     platform: modbus_controller
@@ -494,7 +762,7 @@ sensor:
       sorting_group_id: Status
       sorting_weight: 1
 
-  - name: "Radiator Temperature"
+  - name: "Inverter Temperature"
     id: temperature_2
     icon: mdi:thermometer
     platform: modbus_controller
@@ -537,27 +805,119 @@ sensor:
 ## Entities marked disabled_by_default can break things: enable them in HA only if you know why.
 ###############################################################################
 number:
-## Battery power setpoint 0xFE16 (signed, - = charge, + = discharge).
-## Only honoured while the energy manager (JSON API on TCP 8080, NOT Modbus) is already running
-## a non-zero command with custom mode (EMS 3030) on. Otherwise the write is accepted and reverts
-## within ~1.5 s. The unit also falls back to its schedule slot ~3 s after you stop writing, so
-## it must be re-written continuously (e.g. every 2 s from Home Assistant).
-  - platform: modbus_controller
-    modbus_controller_id: mt
+## Power Setpoint (StekkerDeal convention): positive = charge, negative = discharge, 0 = idle.
+## While Work Mode is "Custom / Manual", it is written (sign-flipped) to 0xFE16 every second.
+  - platform: template
     name: "Power Setpoint"
-    id: power_setpoint_number
-    icon: mdi:target
-    register_type: holding
-    address: 0xFE16
-    value_type: S_WORD
+    id: battery_power_target
+    icon: mdi:battery-sync-outline
     unit_of_measurement: "W"
+    device_class: power
     mode: box
-    min_value: -2500
-    max_value: 2500
+    min_value: -${ems_max_discharge}
+    max_value: ${ems_max_charge}
     step: 1
+    initial_value: 0
+    optimistic: true
+    restore_value: false     # always start at 0 W after a reboot
     web_server:
       sorting_group_id: Control
       sorting_weight: 1
+
+## Internal writer for 0xFE16: the 1 s control loop sets this number, and the number writes
+## the register (ESPHome's own write path). Polled only with the settings (every 10 min).
+  - platform: modbus_controller
+    modbus_controller_id: mt_slow
+    name: "Setpoint Writer"
+    id: setpoint_writer
+    internal: true
+    register_type: holding
+    address: 0xFE16        # register convention: + = discharge, - = charge
+    value_type: S_WORD
+    min_value: -10000
+    max_value: 10000
+    step: 1
+
+## Adjustable power limits. The Power Setpoint is clamped to these, and the battery's own
+## local power cap (3039) is set to the larger of the two. Kept across reboots.
+  - platform: template
+    name: "Max Charge Power"
+    id: max_charge_power
+    icon: mdi:battery-arrow-up
+    unit_of_measurement: "W"
+    device_class: power
+    mode: box
+    min_value: 0
+    max_value: ${ems_max_charge}
+    step: 50
+    initial_value: ${ems_max_charge}
+    optimistic: true
+    restore_value: true
+    on_value:
+      - lambda: 'id(slot_power_sent) = 99999;'   # re-send the energy manager setup (new 3039) in Custom / Manual
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 2
+
+  - platform: template
+    name: "Max Discharge Power"
+    id: max_discharge_power
+    icon: mdi:battery-arrow-down
+    unit_of_measurement: "W"
+    device_class: power
+    mode: box
+    min_value: 0
+    max_value: ${ems_max_discharge}
+    step: 50
+    initial_value: ${ems_max_discharge}
+    optimistic: true
+    restore_value: true
+    on_value:
+      - lambda: 'id(slot_power_sent) = 99999;'
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 3
+
+## Adjustable SOC limits (as StekkerDeal's Charge Limit / Discharge Limit). Written to the battery
+## as 3023/3024 and inside slot 3003 (the battery enforces the ones in the slot), and used by the
+## ESP to stop charging/discharging. Kept across reboots.
+  - platform: template
+    name: "Charge Limit"
+    id: charge_limit
+    icon: mdi:battery-arrow-up
+    unit_of_measurement: "%"
+    device_class: battery
+    mode: slider
+    min_value: 50
+    max_value: 100
+    step: 5
+    initial_value: ${ems_max_soc}
+    optimistic: true
+    restore_value: true
+    on_value:
+      - script.execute: soc_limits_changed
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 4
+
+  - platform: template
+    name: "Discharge Limit"
+    id: discharge_limit
+    icon: mdi:battery-arrow-down
+    unit_of_measurement: "%"
+    device_class: battery
+    mode: slider
+    min_value: 5
+    max_value: 50
+    step: 5
+    initial_value: ${ems_min_soc}
+    optimistic: true
+    restore_value: true
+    on_value:
+      - script.execute: soc_limits_changed
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 5
 
 ## Grid-tie (on-grid output) power cap. Lives in THREE places: 0xA03F, mirror 0x9ACE and EMS 3039
 ## (JSON API only). Output tops out at the lowest of them. This writes both Modbus copies.
@@ -577,11 +937,10 @@ number:
     max_value: 2500        # adjust to your unit's rating
     step: 1
     write_lambda: |-
-      // also write the mirror copy at 0x9ACE
-      auto mirror = modbus_controller::ModbusCommandItem::create_write_single_command(
-          id(mt_slow), 0x9ACE, (uint16_t) x);
-      id(mt_slow)->queue_command(mirror);
-      return x;
+      // write both copies through this entity's own write helper (FC6)
+      item->write_single_register(0xA03F, (uint16_t) x);
+      item->write_single_register(0x9ACE, (uint16_t) x);   // mirror copy
+      return {};   // already sent above
     web_server:
       sorting_group_id: Settings
       sorting_weight: 0
@@ -998,6 +1357,31 @@ number:
       sorting_weight: 22
 
 select:
+  - platform: template
+    name: "Work Mode"
+    id: working_mode
+    icon: mdi:battery-sync-outline
+    options:
+      - "Self-Consumption (AI)"
+      - "Custom / Manual"
+    initial_option: "Self-Consumption (AI)"
+    optimistic: true
+    restore_value: true        # after a reboot, Custom / Manual is re-applied by on_boot
+    set_action:
+      - if:
+          condition:
+            lambda: 'return x == "Custom / Manual";'
+          then:
+            - script.execute: ems_take_control
+          else:
+            - number.set:
+                id: battery_power_target
+                value: 0
+            - script.execute: ems_self_consumption
+    web_server:
+      sorting_group_id: Control
+      sorting_weight: 0
+
   ## plausible mapping, never confirmed against the app
   - platform: modbus_controller
     modbus_controller_id: mt_slow
@@ -1012,6 +1396,14 @@ select:
       "Utility power priority (GID)": 1
       "PV Battery Priority (BAT)": 2
       "Hybrid Priority (HBD)": 3
+      "Unknown": 65535
+    lambda: |-
+      if (x >= 0 && x <= 3) return {};   // known value: use optionsmap
+      ESP_LOGW("select", "Inverter Operating Mode: register holds unknown value %lld", (long long) x);
+      return std::string("Unknown");
+    write_lambda: |-
+      if (x == "Unknown") return {};       // never write the placeholder back
+      return value;
     web_server:
       sorting_group_id: Settings
       sorting_weight: 23
@@ -1029,6 +1421,14 @@ select:
       "Utility Priority (OUO)": 1
       "Mixed mode (SNU)": 2
       "PV only (NUC)": 3
+      "Unknown": 65535
+    lambda: |-
+      if (x >= 0 && x <= 3) return {};   // known value: use optionsmap
+      ESP_LOGW("select", "Charge Priority: register holds unknown value %lld", (long long) x);
+      return std::string("Unknown");
+    write_lambda: |-
+      if (x == "Unknown") return {};       // never write the placeholder back
+      return value;
     web_server:
       sorting_group_id: Settings
       sorting_weight: 24
@@ -1047,6 +1447,14 @@ select:
       "PV to grid": 1
       "Anti-backflow (external CT sensor)": 2
       "Anti-backflow (external smart device)": 3
+      "Unknown": 65535
+    lambda: |-
+      if (x >= 0 && x <= 3) return {};   // known value: use optionsmap
+      ESP_LOGW("select", "On Grid Mode: register holds unknown value %lld", (long long) x);
+      return std::string("Unknown");
+    write_lambda: |-
+      if (x == "Unknown") return {};       // never write the placeholder back
+      return value;
     web_server:
       sorting_group_id: Settings
       sorting_weight: 25
@@ -1063,6 +1471,14 @@ select:
       "UPS mode": 0
       "APL mode": 1
       "GEN mode": 2
+      "Unknown": 65535
+    lambda: |-
+      if (x >= 0 && x <= 2) return {};   // known value: use optionsmap
+      ESP_LOGW("select", "Utility Range: register holds unknown value %lld", (long long) x);
+      return std::string("Unknown");
+    write_lambda: |-
+      if (x == "Unknown") return {};       // never write the placeholder back
+      return value;
     web_server:
       sorting_group_id: Advanced
       sorting_weight: 26
@@ -1085,6 +1501,14 @@ select:
       "Three phase - phase 1": 5
       "Three phase - phase 2": 6
       "Three phase - phase 3": 7
+      "Unknown": 65535
+    lambda: |-
+      if (x >= 0 && x <= 7) return {};   // known value: use optionsmap
+      ESP_LOGW("select", "Parallel Mode: register holds unknown value %lld", (long long) x);
+      return std::string("Unknown");
+    write_lambda: |-
+      if (x == "Unknown") return {};       // never write the placeholder back
+      return value;
     web_server:
       sorting_group_id: Advanced
       sorting_weight: 27
@@ -1114,11 +1538,19 @@ select:
       "Ternary Lithium 8S": 11
       "Ternary Lithium 13S": 12
       "Ternary Lithium 14S": 13
+      "Unknown": 65535
+    lambda: |-
+      if (x >= 0 && x <= 13) return {};   // known value: use optionsmap
+      ESP_LOGW("select", "Battery Type: register holds unknown value %lld", (long long) x);
+      return std::string("Unknown");
+    write_lambda: |-
+      if (x == "Unknown") return {};       // never write the placeholder back
+      return value;
     web_server:
       sorting_group_id: Advanced
       sorting_weight: 28
 
-  ## unit ships on 1 = Pylon
+  ## makstech's unit ships on 1 = Pylon; this battery reads 18 (no name known). Do not change.
   - platform: modbus_controller
     modbus_controller_id: mt_slow
     name: "BMS Protocol"
@@ -1147,6 +1579,15 @@ select:
       "Rvtran": 15
       "YUZE": 16
       "EVT": 17
+      "Factory protocol 18 (this unit)": 18   # read from this battery; not in the makstech list (0-17)
+      "Unknown": 65535
+    lambda: |-
+      if (x >= 0 && x <= 18) return {};   // known value: use optionsmap
+      ESP_LOGW("select", "BMS Protocol: register holds unknown value %lld", (long long) x);
+      return std::string("Unknown");
+    write_lambda: |-
+      if (x == "Unknown") return {};       // never write the placeholder back
+      return value;
     web_server:
       sorting_group_id: Advanced
       sorting_weight: 29
@@ -1173,9 +1614,245 @@ select:
       "SI4777 (Israel)": 8
       "TOR-Z1 (Austria)": 9
       "EN50549-PL (Poland)": 10
+      "Unknown": 65535
+    lambda: |-
+      if (x >= 0 && x <= 10) return {};   // known value: use optionsmap
+      ESP_LOGW("select", "Grid Standard: register holds unknown value %lld", (long long) x);
+      return std::string("Unknown");
+    write_lambda: |-
+      if (x == "Unknown") return {};       // never write the placeholder back
+      return value;
     web_server:
       sorting_group_id: Advanced
       sorting_weight: 30
+
+###############################################################################
+## JSON API CLIENT (energy manager on ${aecc_ip}:${aecc_port})
+###############################################################################
+globals:
+  - id: ems_state            # 0 idle, 1 request running in background task, 2 reply ready
+    type: std::atomic<int>
+  - id: ems_serial
+    type: int
+    initial_value: '0'
+  - id: ems_reply
+    type: std::string
+  - id: ems_error_count
+    type: int
+    initial_value: '0'
+  - id: desired_power        # W, target after SOC limits, as written to 0xFE16
+    type: int
+    initial_value: '0'
+  - id: desired_since_ms
+    type: uint32_t
+    initial_value: '0'
+  - id: slot_power_sent      # W in slot 3003 confirmed by the battery (99999 = unknown)
+    type: int
+    initial_value: '99999'
+  - id: slot_power_pending   # W in a slot write awaiting its reply (99999 = none)
+    type: int
+    initial_value: '99999'
+  - id: last_slot_send_ms
+    type: uint32_t
+    initial_value: '0'
+  - id: setpoint_fallbacks   # consecutive readings where 0xFE16 did not hold the target
+    type: int
+    initial_value: '0'
+  - id: last_takeover_ms     # last time the energy manager setup was re-sent by the watchdog
+    type: uint32_t
+    initial_value: '0'
+
+script:
+  ## Enable the energy manager in custom mode. Slot 3003 carries the current target (as in
+  ## StekkerDeal/aecc-battery-local), so the battery's own fallback command equals the target.
+  ## 0 W -> idle slot (as StekkerDeal): the battery holds 0 W. 3026/3029 (base discharge) are forced
+  ## off: positive values export unconditionally.
+  - id: ems_take_control
+    mode: restart
+    then:
+      - script.execute:
+          id: ems_send
+          body: !lambda |-
+            int w = id(desired_power);
+            int min_soc = (std::isnan(id(discharge_limit).state) ? ${ems_min_soc} : (int) lroundf(id(discharge_limit).state));
+            int max_soc = (std::isnan(id(charge_limit).state) ? ${ems_max_soc} : (int) lroundf(id(charge_limit).state));
+            char slot[64];
+            if (w == 0)
+              snprintf(slot, sizeof(slot), "0,00:00,00:00,0,0,0,0,0,0,%d,%d", max_soc, min_soc);
+            else
+              snprintf(slot, sizeof(slot), "1,00:00,23:59,%d,0,6,5,0,0,%d,%d", w, max_soc, min_soc);
+            id(slot_power_pending) = w;
+            id(last_slot_send_ms) = millis();
+            float mc = id(max_charge_power).state, md = id(max_discharge_power).state;
+            int cap = (int) lroundf(std::max(std::isnan(mc) ? ${ems_max_charge}.0f : mc,
+                                             std::isnan(md) ? ${ems_max_discharge}.0f : md));
+            char extra[96];
+            snprintf(extra, sizeof(extra), "\"3023\":\"%d\",\"3024\":\"%d\",\"3039\":\"%d\",",
+                     min_soc, max_soc, cap);
+            return std::string("\"Set\":\"Energycontrolparameters\",\"SetControlInfo\":{"
+                               "\"3000\":\"1\",\"3020\":\"6\",\"3021\":\"0\",\"3022\":\"0\","
+                               "\"3026\":\"0\",\"3029\":\"0\",\"3030\":\"1\",") + extra + "\"3003\":\"" + slot + "\"}";
+
+  ## A SOC limit changed: send it to the battery (not during the first 30 s, when values are restored at boot).
+  ## Custom / Manual: force the slot interval to re-send the setup. Self-Consumption: re-send that mode.
+  ## Waits 3 s so moving the slider sends only the final value.
+  - id: soc_limits_changed
+    mode: restart
+    then:
+      - delay: 3s
+      - if:
+          condition:
+            lambda: 'return millis() > 30000;'
+          then:
+            - if:
+                condition:
+                  select.is:
+                    id: working_mode
+                    options: "Custom / Manual"
+                then:
+                  - lambda: 'id(slot_power_sent) = 99999;'
+                else:
+                  - script.execute: ems_self_consumption
+
+  ## Hand the battery back to its own self-consumption AI (registers as in StekkerDeal/aecc-battery-local).
+  ## The cleared slot 3003 stops the firmware executing the old manual command.
+  - id: ems_self_consumption
+    mode: restart
+    then:
+      - script.execute:
+          id: ems_send
+          body: !lambda |-
+            int min_soc = (std::isnan(id(discharge_limit).state) ? ${ems_min_soc} : (int) lroundf(id(discharge_limit).state));
+            int max_soc = (std::isnan(id(charge_limit).state) ? ${ems_max_soc} : (int) lroundf(id(charge_limit).state));
+            char buf[256];
+            snprintf(buf, sizeof(buf),
+                     "\"Set\":\"Energycontrolparameters\",\"SetControlInfo\":{\"3000\":\"1\",\"3020\":\"3\","
+                     "\"3021\":\"1\",\"3022\":\"1\",\"3030\":\"0\",\"3023\":\"%d\",\"3024\":\"%d\","
+                     "\"3003\":\"0,00:00,00:00,0,0,0,0,0,0,%d,%d\"}",
+                     min_soc, max_soc, max_soc, min_soc);
+            return std::string(buf);
+
+  ## Sends one newline-terminated JSON request in a background FreeRTOS task (never blocks the main loop).
+  ## Requests are queued; one at a time, since the datalogger only serves one client.
+  - id: ems_send
+    mode: queued
+    max_runs: 5
+    parameters:
+      body: string
+    then:
+      - wait_until:
+          condition:
+            lambda: 'return id(ems_state).load() == 0;'
+          timeout: 60s             # a request can take up to 3 x 10 s
+      - lambda: |-
+          if (id(ems_state).load() != 0) {
+            ESP_LOGW("ems", "previous JSON request still running, request dropped");
+            return;
+          }
+          id(ems_state).store(1);
+          auto *req = new std::string("{" + body + ",\"SerialNumber\":" +
+                                      std::to_string(++id(ems_serial)) + ",\"CommandSource\":\"HA\"}\n");
+          ESP_LOGI("ems", "-> %s", req->c_str());
+          auto task = [](void *arg) {
+            std::string *rq = static_cast<std::string *>(arg);
+            std::string reply;
+            // The battery's WiFi module sometimes does not answer (busy / slow WiFi):
+            // try up to 3 times, 2 s apart, before reporting an error.
+            for (int attempt = 1; attempt <= 3; attempt++) {
+              reply.clear();
+              int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+              if (fd < 0) {
+                reply = "ERROR: no socket";
+              } else {
+                struct sockaddr_in addr {};
+                addr.sin_family = AF_INET;
+                addr.sin_port = htons(${aecc_port});
+                if (::inet_pton(AF_INET, "${aecc_ip}", &addr.sin_addr) != 1) {
+                  reply = "ERROR: invalid aecc_ip '${aecc_ip}'";
+                  ::close(fd);
+                  break;   // retrying will not help
+                }
+                // non-blocking connect with a 3 s timeout
+                ::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+                int rc = ::connect(fd, (struct sockaddr *) &addr, sizeof(addr));
+                bool connected = (rc == 0);
+                if (!connected && errno == EINPROGRESS) {
+                  fd_set wset; FD_ZERO(&wset); FD_SET(fd, &wset);
+                  struct timeval tv {3, 0};
+                  if (::select(fd + 1, nullptr, &wset, nullptr, &tv) > 0) {
+                    int err = 0; socklen_t len = sizeof(err);
+                    ::getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
+                    connected = (err == 0);
+                  }
+                }
+                if (!connected) {
+                  reply = "ERROR: cannot connect to ${aecc_ip}:${aecc_port}";
+                } else {
+                  ::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL, 0) & ~O_NONBLOCK);
+                  struct timeval to {1, 0};   // poll in 1 s steps, up to the 10 s reply window
+                  ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof(to));
+                  ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof(to));
+                  if (::send(fd, rq->data(), rq->size(), 0) != (int) rq->size()) {
+                    reply = "ERROR: send failed";
+                  } else {
+                    // Read until one complete JSON object has arrived: replies can span several
+                    // lines (StekkerDeal/aecc-battery-local), and the module can take up to ~10 s.
+                    char buf[512];
+                    int depth = 0; bool started = false, in_str = false, esc = false, done = false;
+                    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(10000);
+                    while (!done && reply.size() < 8192 && (int32_t) (deadline - xTaskGetTickCount()) > 0) {
+                      int n = ::recv(fd, buf, sizeof(buf), 0);
+                      if (n == 0) break;                                    // connection closed
+                      if (n < 0) { if (errno == EAGAIN || errno == EWOULDBLOCK) continue; break; }
+                      for (int i = 0; i < n && !done; i++) {
+                        char c = buf[i];
+                        reply += c;
+                        if (in_str) { if (esc) esc = false; else if (c == '\\') esc = true; else if (c == '"') in_str = false; }
+                        else if (c == '"') in_str = true;
+                        else if (c == '{') { depth++; started = true; }
+                        else if (c == '}' && started && --depth == 0) done = true;
+                      }
+                    }
+                    if (reply.empty())
+                      reply = "ERROR: no reply";
+                    else if (!done)
+                      reply = "ERROR: incomplete reply: " + reply.substr(0, 120);
+                  }
+                }
+                ::close(fd);
+              }
+              if (reply.rfind("ERROR", 0) != 0) break;   // got an answer
+              if (attempt < 3) vTaskDelay(pdMS_TO_TICKS(2000));
+              else reply += " (after 3 attempts)";
+            }
+            while (!reply.empty() && (reply.back() == '\n' || reply.back() == '\r'))
+              reply.pop_back();
+            id(ems_reply) = reply;
+            id(ems_state).store(2);   // hand the reply to the main loop
+            delete rq;
+            vTaskDelete(nullptr);
+          };
+          if (xTaskCreate(task, "aecc_ems", 6144, req, 1, nullptr) != pdPASS) {
+            delete req;
+            id(ems_state).store(0);
+            ESP_LOGW("ems", "could not start JSON task");
+          }
+
+  ## knop op de atom ingedrukt houden = veranderen brightness
+  - id: adjust_brightness_loop
+    mode: restart
+    then:
+      - repeat:
+          count: 1000
+          then:
+            - lambda: |-
+                static float brightness = 0.0;
+                brightness += 0.1;
+                if (brightness > 1.0) brightness = 0.0;
+                auto call = id(status_led).make_call();
+                call.set_brightness(brightness);
+                call.perform();
+            - delay: 750ms
 
 ###############################################################################
 ## STATUS LED
@@ -1188,7 +1865,7 @@ light:
     icon: mdi:lightbulb
     platform: esp32_rmt_led_strip
     internal: true # Hides from Home Assistant
-    rgb_order: GRB
+    channel_colors: GRB
     pin: 35
     num_leds: 1   # the AtomS3 Lite has a single LED
     chipset: ws2812
@@ -1217,6 +1894,96 @@ light:
 # 🔵 Blue => AP mode
 
 interval:
+  ## Power control loop: write the target to 0xFE16 every second in Custom / Manual mode.
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            select.is:
+              id: working_mode
+              options: "Custom / Manual"
+          then:
+            - lambda: |-
+                float target = -id(battery_power_target).state;   // Power Setpoint is + = charge; register + = discharge
+                if (std::isnan(target)) target = 0;
+                float soc = id(battery_state_of_charge).state;
+                if (!std::isnan(soc)) {
+                  if (target > 0 && soc <= (std::isnan(id(discharge_limit).state) ? ${ems_min_soc} : (int) lroundf(id(discharge_limit).state))) target = 0;   // Discharge Limit reached: no discharge
+                  if (target < 0 && soc >= (std::isnan(id(charge_limit).state) ? ${ems_max_soc} : (int) lroundf(id(charge_limit).state))) target = 0;   // Charge Limit reached: no charge
+                }
+                float max_dis = id(max_discharge_power).state, max_chg = id(max_charge_power).state;
+                if (!std::isnan(max_dis) && target > max_dis) target = max_dis;      // discharge limit
+                if (!std::isnan(max_chg) && target < -max_chg) target = -max_chg;    // charge limit
+                int w = (int) lroundf(target);
+                if (w != id(desired_power)) {
+                  id(desired_power) = w;
+                  id(desired_since_ms) = millis();
+                }
+                auto call = id(setpoint_writer).make_call();   // writes 0xFE16 (FC6)
+                call.set_value(w);
+                call.perform();
+
+  ## Keep schedule slot 3003 (what the battery runs when a 0xFE16 write is missed) equal to the
+  ## target, so a missed write no longer changes the battery power. Updated over JSON once the
+  ## target has been stable for 2 s, at most every ${ems_slot_min_interval} s.
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            and:
+              - select.is:
+                  id: working_mode
+                  options: "Custom / Manual"
+              - lambda: |-
+                  return id(ems_state).load() == 0 &&
+                         id(slot_power_pending) == 99999 &&
+                         id(desired_power) != id(slot_power_sent) &&
+                         millis() - id(desired_since_ms) > 2000 &&
+                         millis() - id(last_slot_send_ms) > ${ems_slot_min_interval} * 1000UL;
+          then:
+            - script.execute: ems_take_control
+
+  ## Reassert the energy manager setup (the vendor app's AI mode rewrites it).
+  - interval: 5min
+    then:
+      - if:
+          condition:
+            select.is:
+              id: working_mode
+              options: "Custom / Manual"
+          then:
+            - script.execute: ems_take_control
+
+  ## Publish JSON replies from the background task (on the main loop, where it is safe).
+  - interval: 250ms
+    then:
+      - lambda: |-
+          if (id(ems_state).load() == 2) {
+            std::string r = id(ems_reply);
+            id(ems_state).store(0);
+            if (id(slot_power_pending) != 99999) {
+              bool ok = r.rfind("ERROR", 0) != 0 && r.find("SetParameters") != std::string::npos &&
+                        r.find("fail") == std::string::npos && r.find("rror") == std::string::npos;
+              if (ok) {
+                id(slot_power_sent) = id(slot_power_pending);
+                ESP_LOGI("ems", "slot 3003 now %d W", id(slot_power_sent));
+              } else {
+                id(slot_power_sent) = 99999;   // unknown: retried by the slot interval
+              }
+              id(slot_power_pending) = 99999;
+            }
+            if (r.rfind("ERROR", 0) == 0) {
+              // keep showing the last good reply; only log + count the failure
+              ESP_LOGW("ems", "<- %s", r.c_str());
+              id(ems_error_count) += 1;
+              id(ems_errors).publish_state(id(ems_error_count));
+              return;
+            }
+            ESP_LOGI("ems", "<- %s", r.c_str());
+            if (r.size() > 250) r = r.substr(0, 247) + "...";
+            id(ems_reply_text).publish_state(r);
+          }
+
   - interval: 10s
     then:
       if:
@@ -1260,20 +2027,3 @@ interval:
                   red: 100%
                   green: 0
                   blue: 0
-
-## knop op de atom ingedrukt houden = veranderen brightness
-script:
-  - id: adjust_brightness_loop
-    mode: restart
-    then:
-      - repeat:
-          count: 1000
-          then:
-            - lambda: |-
-                static float brightness = 0.0;
-                brightness += 0.1;
-                if (brightness > 1.0) brightness = 0.0;
-                auto call = id(status_led).make_call();
-                call.set_brightness(brightness);
-                call.perform();
-            - delay: 750ms
