@@ -16,7 +16,7 @@ substitutions:
 
 esphome:
   name: ${name}
-  # friendly_name: ${friendly_name}  ### temporarely uncommented because of sensor naming wrong for nodered flow gitcode bob
+  # friendly_name: ${friendly_name}  ### temporarely uncommented because of sensor naming wrong
   min_version: 2026.9.0   # needed for modbus turnaround_time
   name_add_mac_suffix: false
 
@@ -32,8 +32,6 @@ esp32:
     sdkconfig_options:
       CONFIG_COMPILER_OPTIMIZATION_SIZE: y   # needs the CONFIG_ prefix, otherwise ignored
       CONFIG_BT_ENABLED: n
-
-## No psram: block - the AtomS3 Lite (ESP32-S3FN8) has no PSRAM.
 
 ## Enable/Disable logging
 logger:
