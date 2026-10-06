@@ -23,8 +23,8 @@ Modbus handles almost everything: live readings, all inverter settings, and the 
 
 | Part | Notes |
 |---|---|
-| **M5Stack AtomS3 Lite** (ESP32-S3) | `esp32-s3-devkitc-1`, 8 MB flash, ESP-IDF framework |
-| **RS485 transceiver** | UART on **GPIO6 (TX)** / **GPIO5 (RX)**, 9600 baud, 8N1 |
+| **[M5Stack AtomS3 Lite](https://www.tinytronics.nl/nl/development-boards/microcontroller-boards/met-wi-fi/m5stack-atom-s3-lite-esp32-s3-development-board)** (ESP32-S3) | `esp32-s3-devkitc-1`, 8 MB flash, ESP-IDF framework |
+| **RS485 transceiver:** [M5Stack Atomic RS485 Base](https://www.tinytronics.nl/nl/communicatie-en-signalen/serieel/rs-485/m5stack-atomic-rs-485-base) | UART on **GPIO6 (TX)** / **GPIO5 (RX)**, 9600 baud, 8N1 |
 | **Cable to the inverter** | RS485 on the inverter's RJ45 port. The pins depend on your brand (see below). |
 
 **RJ45 pinout (Modbus A / B), tested:**
